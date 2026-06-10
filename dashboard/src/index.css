@@ -1,0 +1,25 @@
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+
+@import "tailwindcss";
+@config "../tailwind.config.js";
+
+@layer base {
+  body {
+    @apply bg-background text-textMain font-sans antialiased m-0 min-h-screen;
+  }
+}
+
+/* Scrollbar styling for industrial look */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  @apply bg-background border-l border-borderColor;
+}
+::-webkit-scrollbar-thumb {
+  @apply bg-borderColor;
+}
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-textMuted;
+}
