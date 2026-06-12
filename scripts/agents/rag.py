@@ -29,83 +29,98 @@ def query_knowledge(
         Список найденных чанков с payload
     """
     from .registry import get_agent
-    agent = get_agent(agent_id)
 
-    if not agent.rag.enabled:
-        logger.debug(f"RAG отключен для {agent_id}")
+    # Безопасное получение конфигурации агента
+    try:
+        agent = get_agent(agent_id)
+    except Exception as e:
+        logger.warning(f"RAG [{agent_id}]: агент не найден в реестре ({e}) — пропускаем RAG")
         return []
 
-    # Qdrant клиент
+    # Уважаем отключение RAG на уровне агента
+    if not agent.rag.enabled:
+        logger.debug(f"RAG отключён для {agent_id}")
+        return []
+
+    # Клиент Qdrant не передан => RAG считается отключённым (Qdrant недоступен).
+    # НЕ пересоздаём клиент здесь: generate.py намеренно передаёт None при
+    # недоступном Qdrant ("RAG отключён"), и молчаливое пересоздание ломало бы это.
     if qdrant_client is None:
-        from copywriter_kb.loader import get_qdrant
-        qdrant_client = get_qdrant()
+        logger.info(f"RAG [{agent_id}]: клиент Qdrant не передан — RAG отключён, пропускаем")
+        return []
 
-    # Embedding запроса
-    from copywriter_kb.loader import get_embeddings_batch
-    query_vector = get_embeddings_batch([query_text])[0]
-
-    # Фильтры
-    from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny
-
-    must_conditions = []
-
-    # Фильтр по agent_target
-    agent_filter = agent.rag.filters.get("agent_target")
-    if agent_filter:
-        must_conditions.append(
-            FieldCondition(key="agent_target", match=MatchValue(value=agent_filter))
-        )
-
-    # Фильтр по source_type
-    source_types = agent.rag.filters.get("source_type")
-    if source_types and isinstance(source_types, list):
-        must_conditions.append(
-            FieldCondition(key="source_type", match=MatchAny(any=source_types))
-        )
-
-    # Extra фильтры
-    if extra_filters:
-        for key, value in extra_filters.items():
-            if isinstance(value, list):
-                must_conditions.append(
-                    FieldCondition(key=key, match=MatchAny(any=value))
-                )
-            else:
-                must_conditions.append(
-                    FieldCondition(key=key, match=MatchValue(value=value))
-                )
-
-    # Мягкий фильтр актуальности законов: valid_until >= today ИЛИ поле отсутствует
-    if "valid_until" in agent.rag.payload_fields:
-        from datetime import datetime
-        from qdrant_client import models
-        today_str = datetime.now().strftime("%Y-%m-%d")
-        
-        # В новых версиях qdrant-client для дат используется DatetimeRange, предотвращая предупреждения Pydantic
-        try:
-            range_val = models.DatetimeRange(gte=today_str)
-        except AttributeError:
-            # Резервный обход для старых версий qdrant-client
-            range_val = models.Range(gte=0.0)
-            range_val.gte = today_str
-        
-        must_conditions.append(
-            Filter(should=[
-                FieldCondition(
-                    key="valid_until",
-                    range=range_val,
-                ),
-                models.IsNullCondition(
-                    is_null=models.PayloadField(key="valid_until"),
-                ),
-            ])
-        )
-        logger.info(f"RAG [{agent_id}]: фильтр актуальности (valid_until >= {today_str} OR null)")
-
-    search_filter = Filter(must=must_conditions) if must_conditions else None
-
-    # Поиск
+    # Любой сбой ниже (embedding, построение фильтров, запрос) не должен ронять
+    # пайплайн: при ошибке тихо возвращаем пустой контекст.
     try:
+        # Embedding запроса
+        from copywriter_kb.loader import get_embeddings_batch
+        embeddings = get_embeddings_batch([query_text])
+        if not embeddings or embeddings[0] is None:
+            logger.warning(f"RAG [{agent_id}]: не удалось получить embedding запроса — пропускаем RAG")
+            return []
+        query_vector = embeddings[0]
+
+        # Фильтры
+        from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny
+
+        must_conditions = []
+
+        # Фильтр по agent_target
+        agent_filter = agent.rag.filters.get("agent_target")
+        if agent_filter:
+            must_conditions.append(
+                FieldCondition(key="agent_target", match=MatchValue(value=agent_filter))
+            )
+
+        # Фильтр по source_type
+        source_types = agent.rag.filters.get("source_type")
+        if source_types and isinstance(source_types, list):
+            must_conditions.append(
+                FieldCondition(key="source_type", match=MatchAny(any=source_types))
+            )
+
+        # Extra фильтры
+        if extra_filters:
+            for key, value in extra_filters.items():
+                if isinstance(value, list):
+                    must_conditions.append(
+                        FieldCondition(key=key, match=MatchAny(any=value))
+                    )
+                else:
+                    must_conditions.append(
+                        FieldCondition(key=key, match=MatchValue(value=value))
+                    )
+
+        # Мягкий фильтр актуальности законов: valid_until >= today ИЛИ поле отсутствует
+        if "valid_until" in agent.rag.payload_fields:
+            from datetime import datetime
+            from qdrant_client import models
+            today_str = datetime.now().strftime("%Y-%m-%d")
+
+            # В новых версиях qdrant-client для дат используется DatetimeRange, предотвращая предупреждения Pydantic
+            try:
+                range_val = models.DatetimeRange(gte=today_str)
+            except AttributeError:
+                # Резервный обход для старых версий qdrant-client
+                range_val = models.Range(gte=0.0)
+                range_val.gte = today_str
+
+            must_conditions.append(
+                Filter(should=[
+                    FieldCondition(
+                        key="valid_until",
+                        range=range_val,
+                    ),
+                    models.IsNullCondition(
+                        is_null=models.PayloadField(key="valid_until"),
+                    ),
+                ])
+            )
+            logger.info(f"RAG [{agent_id}]: фильтр актуальности (valid_until >= {today_str} OR null)")
+
+        search_filter = Filter(must=must_conditions) if must_conditions else None
+
+        # Поиск
         results = qdrant_client.query_points(
             collection_name=agent.rag.collection,
             query=query_vector,
@@ -129,7 +144,7 @@ def query_knowledge(
         return chunks
 
     except Exception as e:
-        logger.error(f"RAG [{agent_id}] ошибка: {e}")
+        logger.error(f"RAG [{agent_id}] ошибка — пропускаем RAG (возвращаем пустой контекст): {e}")
         return []
 
 

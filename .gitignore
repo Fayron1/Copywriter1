@@ -28,8 +28,17 @@ Thumbs.db
 # Output / generated
 *.json
 !package.json
+!config/styles_config.json
+!dashboard/package-lock.json
 output/
 *.log
 
 # Books (too large for git)
 Books/
+
+# Local files kept on PC but ignored on GitHub
+scripts/distill_books.py
+10 пунктов о переходе на УСН с НДС в 2026 году.txt
+Article Styles/
+backup_before_update/
+Обновление/

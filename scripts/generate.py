@@ -3,9 +3,9 @@
 generate.py — CLI для генерации статей через мультиагентный pipeline.
 
 Использование:
-    python generate.py "Как открыть ООО в 2026 году" --type case_study --dir юридическое
-    python generate.py "10 ошибок при УСН" --type checklist --dir налоги --no-scout
-    python generate.py "Штрафы за неприменение ККТ" --type law_review --no-images
+    python generate.py "Как открыть ООО в 2026 году" --type seo --dir юридическое
+    python generate.py "10 ошибок при УСН" --type seo --style checklist --dir налоги --no-scout
+    python generate.py "Разбор налоговой реформы 2026" --type longread --dir налоги
 
 Результат сохраняется в output/<timestamp>_<slug>/
 """
@@ -66,14 +66,20 @@ def save_html_preview(state, output_dir: Path):
 
     # Определение человеческого типа статьи
     type_names = {
+        "seo": "СЕО-статья",
+        "longread": "Лонгрид",
+    }
+    # Если выбран конкретный стиль-пресет — показываем его человеческое имя,
+    # иначе человеческое имя размерного типа (seo/longread).
+    style_names = {
         "checklist": "Чек-лист «10 пунктов»",
         "analysis": "Аналитический лонгрид",
         "case_study": "Бизнес-кейс",
         "law_review": "Разбор законодательства",
         "reference": "Практический справочник",
-        "free_style": "Свободная статья"
+        "free_style": "Свободная статья",
     }
-    type_name = type_names.get(state.article_type, "Статья")
+    type_name = style_names.get(getattr(state, "style_id", ""), type_names.get(state.article_type, "Статья"))
     direction = state.direction or "Бизнес"
     # Встроенный парсер метаданных для полной независимости от pipeline.py
     def _extract_meta_from_text(text: str) -> dict:
@@ -717,9 +723,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Примеры:
-  python generate.py "Как открыть ООО" --type case_study --dir юридическое
-  python generate.py "10 ошибок УСН" --type checklist --dir налоги --no-scout
-  python generate.py "Штрафы за ККТ" --type law_review --no-images
+  python generate.py "Как открыть ООО" --type seo --dir юридическое
+  python generate.py "10 ошибок УСН" --type seo --style checklist --dir налоги --no-scout
+  python generate.py "Разбор налоговой реформы 2026" --type longread --dir налоги
         """,
     )
 
@@ -727,9 +733,9 @@ def main():
     parser.add_argument(
         "--type", "-t",
         dest="article_type",
-        default="analysis",
-        choices=["checklist", "case_study", "law_review", "reference", "analysis", "custom"],
-        help="Тип статьи (default: analysis)",
+        default="seo",
+        choices=["seo", "longread"],
+        help="Тип статьи по размеру: seo (до 10000) / longread (до 30000). default: seo",
     )
     parser.add_argument(
         "--dir", "-d",

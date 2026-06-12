@@ -13,6 +13,7 @@
 - output_to: кому передаёт результат
 - retry_on_fail: сколько раз повторить при неудаче
 """
+import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any
 
@@ -56,6 +57,32 @@ class AgentConfig:
 # Реестр: 9 агентов
 # ============================================================
 
+# ============================================================
+# Единый реестр ID моделей — ЕДИНСТВЕННЫЙ источник правды.
+# Значения переопределяются через окружение (.env) без правки кода.
+# Дефолты = текущие значения (поведение не меняется); правильность
+# проверяется preflight-ом на старте Pipeline.run().
+# ============================================================
+
+MODELS: Dict[str, str] = {
+    # DeepSeek — основной провайдер генерации текста
+    "deepseek_pro":   os.getenv("MODEL_DEEPSEEK_PRO",   "deepseek-v4-pro"),
+    "deepseek_flash": os.getenv("MODEL_DEEPSEEK_FLASH", "deepseek-v4-flash"),
+    # OpenAI — fallback при provider="openai"
+    "openai_text":    os.getenv("MODEL_OPENAI_TEXT",    "gpt-4o"),
+    # KIE — fallback при provider="kie"
+    "kie_text":       os.getenv("MODEL_KIE_TEXT",       "claude-4.7"),
+    # Генерация изображений (через OpenAI-совместимый эндпойнт)
+    "openai_image_primary":  os.getenv("MODEL_OPENAI_IMAGE_PRIMARY",  "gpt-image-2"),
+    "openai_image_fallback": os.getenv("MODEL_OPENAI_IMAGE_FALLBACK", "dall-e-3"),
+}
+
+
+def get_text_model_ids() -> set:
+    """Уникальные ID текстовых моделей, реально используемых агентами."""
+    return {a.model for a in AGENTS.values()}
+
+
 AGENTS: Dict[str, AgentConfig] = {
 
     # ───────────────────────────────────────────────
@@ -65,7 +92,7 @@ AGENTS: Dict[str, AgentConfig] = {
         id="brain",
         name="The Brain",
         label="🧠 Оркестратор",
-        model="deepseek-v4-pro",
+        model=MODELS["deepseek_pro"],
         temperature=0.2,       # Строгая логика, минимум креатива
         max_tokens=4000,
         description="Главный планировщик. Декомпозиция задач, маршрутизация, контроль качества.",
@@ -86,7 +113,7 @@ AGENTS: Dict[str, AgentConfig] = {
         id="fact_finder",
         name="The Fact-Finder",
         label="🔎 Исследователь",
-        model="deepseek-v4-flash",
+        model=MODELS["deepseek_flash"],
         temperature=0.1,       # Максимальная точность
         max_tokens=6000,
         description="Хранитель истины. Семантический поиск фактов, законов, цитат.",
@@ -112,7 +139,7 @@ AGENTS: Dict[str, AgentConfig] = {
         id="scout",
         name="The Scout",
         label="📡 Разведчик",
-        model="deepseek-v4-flash",
+        model=MODELS["deepseek_flash"],
         temperature=0.4,       # Немного креатива для «угла подачи»
         max_tokens=3000,
         description="Разведчик повестки. Тренды, SERP, newsjacking, конкуренты.",
@@ -134,7 +161,7 @@ AGENTS: Dict[str, AgentConfig] = {
         id="engineer",
         name="The Engineer",
         label="🏗️ Структурировщик",
-        model="deepseek-v4-pro",
+        model=MODELS["deepseek_pro"],
         temperature=0.2,
         max_tokens=5000,
         description="Архитектор логики. Каркас статьи, фреймворки, модульная структура.",
@@ -158,7 +185,7 @@ AGENTS: Dict[str, AgentConfig] = {
         id="heart",
         name="The Heart",
         label="✍️ Писатель",
-        model="deepseek-v4-pro",
+        model=MODELS["deepseek_pro"],
         temperature=0.65,       # Стабильный ритм, достаточная вариативность
         max_tokens=16000,       # Длинные статьи (30k символов = ~16k токенов)
         description="Мастер слога. Текст, стиль, голос эксперта, ритм.",
@@ -183,7 +210,7 @@ AGENTS: Dict[str, AgentConfig] = {
         id="sheriff",
         name="The Sheriff",
         label="🔫 Редактор",
-        model="deepseek-v4-pro",
+        model=MODELS["deepseek_pro"],
         temperature=0.1,        # Минимум креатива — строгие правила
         max_tokens=6000,
         description="Безжалостный цензор. Факт-чекинг, стиль, anti-синтетика, Turing Score.",
@@ -207,7 +234,7 @@ AGENTS: Dict[str, AgentConfig] = {
         id="mirror",
         name="The Mirror",
         label="🪞 Зеркало",
-        model="deepseek-v4-flash",
+        model=MODELS["deepseek_flash"],
         temperature=0.1,        # Строгий алгоритм
         max_tokens=4000,
         description="Anti-AI контроль. Perplexity, burstiness, humanization.",
@@ -224,7 +251,7 @@ AGENTS: Dict[str, AgentConfig] = {
         id="booster",
         name="The Booster",
         label="🚀 SEO/GEO",
-        model="deepseek-v4-flash",
+        model=MODELS["deepseek_flash"],
         temperature=0.3,
         max_tokens=8000,
         description="Хакер алгоритмов. Schema.org, E-E-A-T, Citation Bait, GEO.",
@@ -248,7 +275,7 @@ AGENTS: Dict[str, AgentConfig] = {
         id="artist",
         name="The Artist",
         label="🎨 Визуализатор",
-        model="deepseek-v4-flash",
+        model=MODELS["deepseek_flash"],
         temperature=0.5,
         max_tokens=3000,
         description="Арт-директор. Промпты для GPT Image 2.0, брендбук, инфографика.",

@@ -18,10 +18,11 @@ import logging
 from typing import Dict, Any, Optional
 from dataclasses import dataclass, field
 
-from .registry import get_agent, AGENTS
+from .registry import get_agent, AGENTS, MODELS, get_text_model_ids
 from .prompts import get_system_prompt
 from .rag import query_knowledge, format_rag_context
 from .patterns import PATTERNS
+from .freshness import check_facts as _freshness_check
 
 logger = logging.getLogger("agents.pipeline")
 
@@ -268,6 +269,8 @@ class PipelineState:
     # Выходы агентов
     brain_output: Dict = field(default_factory=dict)
     facts: Dict = field(default_factory=dict)
+    facts_original: Dict = field(default_factory=dict)  # бэкап фактов до проверки актуальности
+    freshness_changes: list = field(default_factory=list)  # журнал правок актуальности
     scout_data: Dict = field(default_factory=dict)
     blueprint: Dict = field(default_factory=dict)
     draft: str = ""
@@ -322,21 +325,101 @@ class Pipeline:
     ):
         import os
         from openai import OpenAI
+
+        # OpenAI — ключ приходит от вызывающей стороны (generate.py читает из окружения)
+        if not openai_api_key:
+            raise RuntimeError(
+                "OPENAI_API_KEY не задан. Укажите ключ в окружении (.env) — "
+                "хардкод ключей в коде запрещён."
+            )
         self.openai_client = OpenAI(api_key=openai_api_key, timeout=120.0)
         self.client = self.openai_client  # fallback
-        
-        deepseek_key = os.getenv("DEEPSEEK_API_KEY", "sk-23fc8150d8b14854ba3008c9e9e327f5")
+
+        # DeepSeek — основной провайдер генерации текста (обязателен).
+        # Ключ берётся ТОЛЬКО из окружения; fallback-хардкод убран.
+        deepseek_key = os.getenv("DEEPSEEK_API_KEY")
+        if not deepseek_key:
+            raise RuntimeError(
+                "DEEPSEEK_API_KEY не задан. Укажите ключ в окружении (.env) — "
+                "хардкод ключей в коде запрещён."
+            )
         deepseek_base = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com/v1")
         self.deepseek_client = OpenAI(api_key=deepseek_key, base_url=deepseek_base, timeout=120.0)
-        
-        kie_key = os.getenv("KIE_API_KEY", "b21a40b5c6610f89d77bfa811e34d76a")
+
+        # KIE — провайдер генерации изображений (опционален; нужен только при provider="kie").
+        kie_key = os.getenv("KIE_API_KEY")
         kie_base = os.getenv("KIE_API_BASE", "https://api.kie.ai/v1")
-        self.kie_client = OpenAI(api_key=kie_key, base_url=kie_base, timeout=120.0)
+        self.kie_client = (
+            OpenAI(api_key=kie_key, base_url=kie_base, timeout=120.0) if kie_key else None
+        )
         
         self.qdrant = qdrant_client
         self.style = style_fingerprint
         self.max_sheriff = 2  # Hard cap
         self.max_mirror = 2   # Hard cap
+
+    # ────────────────────────────────────────────
+    # Preflight: проверка моделей
+    # ────────────────────────────────────────────
+
+    def preflight(self, check_image: bool = True) -> None:
+        """Проверяет доступность всех моделей ДО запуска генерации (fail-fast).
+
+        Использует листинг моделей провайдера (models.list) без платных вызовов.
+        Собирает ВСЕ недоступные ID и поднимает единый RuntimeError со списком,
+        чтобы неверные имена моделей вскрывались на старте, а не в середине прогона.
+        """
+        errors = []
+        cache = {}
+
+        def available(client):
+            key = id(client)
+            if key not in cache:
+                try:
+                    cache[key] = {m.id for m in client.models.list().data}
+                except Exception:
+                    cache[key] = None  # провайдер не поддерживает листинг
+            return cache[key]
+
+        def is_ok(client, model_id):
+            if client is None or not model_id:
+                return False
+            ids = available(client)
+            if ids is None:
+                try:
+                    client.models.retrieve(model_id)
+                    return True
+                except Exception:
+                    return False
+            return model_id in ids
+
+        # Текстовые модели агентов (DeepSeek по умолчанию)
+        for model_id in sorted(get_text_model_ids()):
+            if not is_ok(self.deepseek_client, model_id):
+                errors.append(f"DeepSeek (агент): модель '{model_id}' недоступна")
+
+        # OpenAI fallback-модель текста
+        if not is_ok(self.openai_client, MODELS["openai_text"]):
+            errors.append(f"OpenAI текст: модель '{MODELS['openai_text']}' недоступна")
+
+        # KIE fallback-модель — только если клиент создан
+        if self.kie_client is not None:
+            if not is_ok(self.kie_client, MODELS["kie_text"]):
+                errors.append(f"KIE текст: модель '{MODELS['kie_text']}' недоступна")
+
+        # Изображения: достаточно, чтобы работала ХОТЯ БЫ ОДНА из пары primary/fallback
+        if check_image:
+            img_p = MODELS["openai_image_primary"]
+            img_f = MODELS["openai_image_fallback"]
+            if not (is_ok(self.openai_client, img_p) or is_ok(self.openai_client, img_f)):
+                errors.append(f"OpenAI изображения: ни '{img_p}', ни '{img_f}' недоступны")
+
+        if errors:
+            raise RuntimeError(
+                "Preflight моделей не пройден — исправьте ID моделей через окружение "
+                "(.env, переменные MODEL_*):\n  - " + "\n  - ".join(errors)
+            )
+        logger.info("   ✅ Preflight моделей пройден")
 
     # ────────────────────────────────────────────
     # Главный метод
@@ -374,6 +457,9 @@ class Pipeline:
         Returns:
             PipelineState с финальной статьёй и метаданными
         """
+        # Preflight: проверяем доступность моделей до начала генерации (fail-fast)
+        self.preflight(check_image=not skip_images)
+
         # Авто-определение стиля по типу статьи если не указан
         effective_style = style_id or article_type
 
@@ -423,6 +509,9 @@ class Pipeline:
             # 2. Fact-Finder — факты из RAG
             self._step_fact_finder(state)
 
+            # 2.5 Freshness — авто-проверка актуальности фактов (после Fact-Finder, до написания)
+            self._step_freshness(state)
+
             # 3. Scout — тренды (опционально)
             if not skip_scout:
                 self._step_scout(state)
@@ -461,7 +550,7 @@ class Pipeline:
 
                 # Объединяем фидбек и делаем ОДНУ ревизию
                 logger.info(f"🔄 Объединённая ревизия #{i+1}")
-                self._step_combined_revision(state)
+                self._heart_patch(state)
                 self._log_draft_length(f"Объединённая ревизия {i+1}", state.draft)
 
             # 7. Booster — SEO/GEO (только если есть текст)
@@ -554,6 +643,25 @@ class Pipeline:
         state.facts = self._call_agent("fact_finder", user_msg, state=state)
         state.steps_completed.append("fact_finder")
 
+    def _step_freshness(self, state: PipelineState):
+        """Шаг 2.5: авто-проверка актуальности фактов через kie.ai + Google Search.
+
+        Полностью автоматический, без ручного участия. Заменяет устаревшие
+        значения только при высокой уверенности и наличии источника. Любая
+        ошибка не ломает пайплайн — факты остаются исходными.
+        """
+        try:
+            if not state.facts or not isinstance(state.facts, dict):
+                return
+            updated, changes = _freshness_check(state.facts)
+            state.freshness_changes = changes
+            if changes:
+                state.facts_original = state.facts  # бэкап для аудита
+                state.facts = updated
+            state.steps_completed.append("freshness")
+        except Exception as e:
+            logger.warning(f"⚠️ [freshness] шаг пропущен из-за ошибки: {e}")
+
     def _step_scout(self, state: PipelineState):
         """Шаг 3: Scout — тренды и актуальность."""
         logger.info("📡 [3/8] Scout: анализ трендов через интернет...")
@@ -621,7 +729,7 @@ class Pipeline:
         state.blueprint = self._call_agent("engineer", user_msg, state=state)
         
         # Quality Gate: Проверка количества пунктов для чек-листа (строго 10 пунктов)
-        if state.article_type == "checklist":
+        if state.style_id == "checklist":
             sections = self._extract_sections(state.blueprint)
             if len(sections) < 10:
                 logger.warning(f"⚠️ [Quality Gate] Engineer сгенерировал только {len(sections)} разделов вместо 10. Запрашиваем структуру заново.")
@@ -634,7 +742,7 @@ class Pipeline:
                 state.blueprint = self._call_agent("engineer", retry_msg, state=state)
 
         # Hard Fail: Проверка Хронотопа (только для кейсов)
-        if state.article_type == "case_study":
+        if state.style_id == "case_study":
             blueprint_str = json.dumps(state.blueprint, ensure_ascii=False)
             if "[CHRONOTOPE_SCENE]" not in blueprint_str:
                 logger.warning("⚠️ [Hard Fail] В структуре нет тега [CHRONOTOPE_SCENE]. Запрашиваем структуру заново.")
@@ -646,7 +754,7 @@ class Pipeline:
     def _step_heart(self, state: PipelineState):
         """Шаг 5: Heart — написание черновика.
 
-        Для лонгридов (>8000 целевых символов) использует
+        Для лонгридов (>20000 целевых символов после резерва) использует
         посекционную генерацию: Heart пишет каждый раздел
         из blueprint отдельным вызовом, затем собирает.
         """
@@ -682,7 +790,7 @@ class Pipeline:
         if chunks:
             rag_block = format_rag_context(chunks, max_chars=4000)
 
-        if heart_target > 20000 or state.article_type == "checklist":
+        if heart_target > 20000:
             state.draft = self._heart_sectional(state, style_block, rag_block, heart_target)
         else:
             state.draft = self._heart_single(state, style_block, rag_block, heart_target)
@@ -695,8 +803,34 @@ class Pipeline:
         if paragraphs:
             first_two_paragraphs = " ".join(paragraphs[:2]).lower()
             
-            ai_buzzwords = ["реестр", "статус", "колонка", "таблиц", "акт", "баз", "шаблон", "агент", "промпт", "стоп-строк", "генерац", "инструкц"]
-            matched_buzzwords = [w for w in ai_buzzwords if w in first_two_paragraphs]
+            # Служебная ИИ/методологическая лексика — маркеры утечки внутреннего
+            # процесса генерации в текст статьи. Сопоставление по ГРАНИЦЕ СЛОВА (\b,
+            # Unicode-aware), чтобы исключить ложные срабатывания подстрокой:
+            #   «контрагент»→«агент», «контакт»/«актив»/«актуальный»→«акт»,
+            #   «базовый»→«база», «инструкция»/«таблица»/«шаблон» и т.п.
+            # Неоднозначные одиночные термины (акт, база, агент, статус, инструкция,
+            # таблица, шаблон, колонка, реестр) — частые в деловых текстах — заменены
+            # на устойчивые методологические словосочетания, которых нет в нормальной прозе.
+            import re as _re_buzz
+            ai_buzzword_patterns = [
+                r"\bпромпт\w*",
+                r"\bprompt\w*",
+                r"\bстоп[-\s]?(?:строк|слов|фраз)\w*",
+                r"\bреестр\w*\s+статус\w*",            # «реестр статусов»
+                r"\bколонк\w*\s+таблиц\w*",             # «колонка таблицы»
+                r"\bбаз\w*\s+знаний",                   # «база знаний»
+                r"\bшаблон\w*\s+(?:промпт|генерац|стать)\w*",
+                r"\b(?:ии|ai)[-\s]?агент\w*",           # «ИИ-агент»
+                r"\bструктурировщик\w*",
+                r"\bblueprint\w*",
+                r"\bгенерац\w*\s+(?:стать|контент|текст)\w*",
+                r"\bsystem\s+prompt\b",
+            ]
+            matched_buzzwords = []
+            for _bp in ai_buzzword_patterns:
+                _bm = _re_buzz.search(_bp, first_two_paragraphs, _re_buzz.IGNORECASE)
+                if _bm:
+                    matched_buzzwords.append(_bm.group(0))
             
             if len(matched_buzzwords) >= 2:
                 logger.warning(f"   ⚠️ [Sanity Check Failed] В начале статьи обнаружена служебная ИИ-лексика: {matched_buzzwords}. Перезапуск генерации...")
@@ -707,7 +841,7 @@ class Pipeline:
                     f"Re-write the text, starting completely fresh and adhering strictly to this rule."
                 )
                 
-                if heart_target > 20000 or state.article_type == "checklist":
+                if heart_target > 20000:
                     state.draft = self._heart_sectional(state, style_block + warning_msg, rag_block, heart_target)
                 else:
                     state.draft = self._heart_single(state, style_block + warning_msg, rag_block, heart_target)
@@ -776,7 +910,7 @@ class Pipeline:
             logger.warning("⚠️ Не удалось извлечь разделы из blueprint, fallback на single")
             return self._heart_single(state, style_block, rag_block, target_chars)
 
-        if state.article_type == "checklist":
+        if state.style_id == "checklist":
             chars_per_section = int((target_chars * 0.75) // len(sections))
         elif len(sections) > 5:
             chars_per_section = int((target_chars * 0.8) // len(sections))
@@ -823,7 +957,7 @@ class Pipeline:
 
         full_article = "\n\n".join(parts)
 
-        if state.article_type == "checklist":
+        if state.style_id == "checklist":
             logger.info("   ✍️ Генерирую Послесловие (заключение) для чек-листа...")
             conclusion_msg = (
                 f"Ты пишешь Послесловие (заключение) для чек-листа.\n\n"
@@ -857,11 +991,11 @@ class Pipeline:
         logger.info(f"   ✂️ Сокращаю: {len(draft)} → {target_chars} (убрать ~{overflow} символов)")
 
         h2_count_before = 0
-        if state.article_type == "checklist":
+        if state.style_id == "checklist":
             h2_count_before = len(_re.findall(r'^## \d+\.', draft, _re.MULTILINE))
         
         extra_instruction = ""
-        if state.article_type == "checklist":
+        if state.style_id == "checklist":
             extra_instruction = (
                 "\n\nПРИМЕЧАНИЕ ДЛЯ ЧЕК-ЛИСТА:\n"
                 "- Сохраняй структуру (все заголовки ## должны остаться).\n"
@@ -886,7 +1020,7 @@ class Pipeline:
             logger.warning(f"   ⚠️ Сокращение не удалось ({len(result)} символов), оставляю оригинал")
             return draft
 
-        if state.article_type == "checklist" and h2_count_before > 0:
+        if state.style_id == "checklist" and h2_count_before > 0:
             h2_count_after = len(_re.findall(r'^## \d+\.', result, _re.MULTILINE))
             if h2_count_after < h2_count_before:
                 logger.warning(f"   ⚠️ Condense удалил пункты ({h2_count_before} → {h2_count_after}). Откат.")
@@ -991,13 +1125,277 @@ class Pipeline:
             state.sheriff_iterations += 1
         logger.info(f"   📏 Draft после объединённой ревизии: {len(state.draft)} символов")
 
+    # ────────────────────────────────────────────
+    # Хирургический редактор: правки по разделам, а не всей статьи
+    # ────────────────────────────────────────────
+
+    def _split_markdown_sections(self, text: str) -> list:
+        """Разбить markdown на блоки по H2 (## ). Срезы непрерывны: join(raw)==text.
+
+        Возвращает список {"level": 0|2, "heading": str, "raw": str}. level 0 —
+        вступление до первого H2. H3/H4 остаются внутри своего H2-блока.
+        """
+        import re
+        matches = list(re.finditer(r"(?m)^##\s+.*$", text))
+        if not matches:
+            return [{"level": 0, "heading": "", "raw": text}]
+        blocks = []
+        if matches[0].start() > 0:
+            blocks.append({"level": 0, "heading": "", "raw": text[:matches[0].start()]})
+        for idx, m in enumerate(matches):
+            start = m.start()
+            end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+            heading = m.group().lstrip("#").strip()
+            blocks.append({"level": 2, "heading": heading, "raw": text[start:end]})
+        return blocks
+
+    def _reassemble_sections(self, blocks: list) -> str:
+        return "".join(b["raw"] for b in blocks)
+
+    def _raw_json_call(self, system_prompt: str, user_message: str, state=None,
+                       max_tokens: int = 2000, temperature: float = 0.1) -> dict:
+        """Вспомогательный строгий JSON-вызов (не зарегистрированный агент).
+
+        Идёт через _chat_completion (retry/backoff + json-mode + fallback) и
+        устойчивый парсер. Выбор провайдера/модели — как в _call_agent.
+        """
+        base_agent = get_agent("sheriff")
+        current_client = self.deepseek_client
+        model_name = base_agent.model
+        if state is not None:
+            provider = getattr(state, "provider", "deepseek").lower()
+            custom_model = getattr(state, "model", None)
+            if provider == "kie" and self.kie_client is not None:
+                current_client = self.kie_client
+                model_name = custom_model or MODELS["kie_text"]
+            elif provider == "openai":
+                current_client = self.openai_client
+                model_name = custom_model or MODELS["openai_text"]
+            elif provider == "deepseek" and custom_model:
+                model_name = custom_model
+        resp = self._chat_completion(
+            current_client,
+            response_format={"type": "json_object"},
+            model=model_name,
+            messages=[
+                {"role": "system", "content": system_prompt + " Ответ строго в формате JSON."},
+                {"role": "user", "content": user_message},
+            ],
+            temperature=temperature,
+            max_completion_tokens=max_tokens,
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        parsed = self._parse_json_response(raw, "edit_planner")
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _build_edit_plan(self, state: 'PipelineState', sections: list) -> list:
+        """Сопоставить замечания Sheriff/Mirror с конкретными разделами (строгий JSON).
+
+        Возвращает отвалидированный список {"section_index","reason","instruction"}
+        только для существующих H2-разделов. Пустой список = править нечего.
+        """
+        lines = []
+        for i, b in enumerate(sections):
+            body = b["raw"].strip().replace("\n", " ")
+            if b["level"] == 2:
+                preview = body[:400] + ("…" if len(body) > 400 else "")
+                lines.append(f"[{i}] {preview}")
+            else:
+                preview = body[:120] + ("…" if len(body) > 120 else "")
+                lines.append(f"[{i}] (вступление) {preview}")
+        catalog = "\n".join(lines)
+
+        sheriff = json.dumps(state.sheriff_review or {}, ensure_ascii=False)
+        mirror = json.dumps(getattr(state, "mirror_review", {}) or {}, ensure_ascii=False)
+        if len(sheriff) > 4000:
+            sheriff = sheriff[:4000] + "…"
+        if len(mirror) > 4000:
+            mirror = mirror[:4000] + "…"
+
+        system = (
+            "Ты — планировщик точечных правок статьи. Тебе дают статью, разбитую на "
+            "пронумерованные разделы, и замечания редактора (Sheriff) и стилиста (Mirror). "
+            "Определи, какие КОНКРЕТНЫЕ разделы нужно поправить и что именно изменить. "
+            "НЕ переписывай текст. Включай ТОЛЬКО разделы, где правка реально нужна "
+            "(чем меньше, тем лучше). Формат строго: "
+            "{\"edits\":[{\"section_index\":<целое>,\"reason\":\"<кратко>\","
+            "\"instruction\":\"<что именно сделать в этом разделе>\"}]}. "
+            "Если правок нет — верни {\"edits\":[]}."
+        )
+        user = (
+            f"РАЗДЕЛЫ СТАТЬИ (индекс в квадратных скобках):\n{catalog}\n\n"
+            f"ЗАМЕЧАНИЯ РЕДАКТОРА (Sheriff):\n{sheriff}\n\n"
+            f"ЗАМЕЧАНИЯ СТИЛИСТА (Mirror):\n{mirror}\n\n"
+            f"Верни JSON со списком правок по разделам."
+        )
+        try:
+            data = self._raw_json_call(system, user, state=state, max_tokens=2000, temperature=0.1)
+        except Exception as e:
+            logger.warning(f"   ⚠️ Планировщик правок недоступен ({e}); fallback на полную ревизию.")
+            return []
+
+        raw_edits = data.get("edits") if isinstance(data, dict) else None
+        if not isinstance(raw_edits, list):
+            return []
+        edits = []
+        for e in raw_edits:
+            if not isinstance(e, dict):
+                continue
+            idx = e.get("section_index")
+            try:
+                idx = int(idx)
+            except (TypeError, ValueError):
+                continue
+            if not (0 <= idx < len(sections)) or sections[idx]["level"] != 2:
+                continue
+            reason = str(e.get("reason", "")).strip()
+            instruction = str(e.get("instruction", "") or reason).strip()
+            edits.append({"section_index": idx, "reason": reason, "instruction": instruction})
+        return edits
+
+    def _section_ok(self, orig: dict, new: str) -> bool:
+        s = (new or "").strip()
+        if len(s) < 40 or not s.startswith("##"):
+            return False
+        olen = len(orig["raw"])
+        if len(s) < olen * 0.3 or len(s) > olen * 3 + 500:
+            return False
+        return True
+
+    def _rewrite_section(self, state: 'PipelineState', sec: dict,
+                         prev_tail: str, next_head: str, instruction: str) -> str:
+        """Переписать ОДИН раздел с контекстом стыков и общим планом."""
+        target = int(len(sec["raw"]) * 1.15)
+        bp = json.dumps(getattr(state, "blueprint", {}) or {}, ensure_ascii=False)
+        if len(bp) > 3000:
+            bp = bp[:3000] + " …"
+        msg = (
+            f"Ты редактируешь ОДИН раздел статьи, не трогая остальные.\n\n"
+            f"ТЕМА СТАТЬИ: {state.topic}\n\n"
+            f"ПЛАН ВСЕЙ СТАТЬИ (для логики; НЕ переписывай его):\n{bp}\n\n"
+            f"КОНЕЦ ПРЕДЫДУЩЕГО РАЗДЕЛА (только для плавного стыка; НЕ повторяй и НЕ переписывай):\n…{prev_tail}\n\n"
+            f"НАЧАЛО СЛЕДУЮЩЕГО РАЗДЕЛА (только для стыка; НЕ переписывай):\n{next_head}…\n\n"
+            f"ТЕКУЩИЙ РАЗДЕЛ (именно его нужно переписать):\n{sec['raw']}\n\n"
+            f"ЧТО ИСПРАВИТЬ В ЭТОМ РАЗДЕЛЕ:\n{instruction or '- общая шлифовка по замечаниям'}\n\n"
+            f"ТРЕБОВАНИЯ:\n"
+            f"- Верни ТОЛЬКО переписанный этот раздел в Markdown, начиная с того же заголовка '## {sec['heading']}'.\n"
+            f"- Сохрани этот же заголовок и примерно тот же объём (~{len(sec['raw'])} символов).\n"
+            f"- Текст должен логично продолжать предыдущий раздел и подводить к следующему.\n"
+            f"- НЕ добавляй и НЕ удаляй заголовки H2; не пиши ничего вне этого раздела.\n"
+        )
+        result = self._generate_clean_heart_text(msg, target_chars=target)
+        return (result or "").strip()
+
+    def _heart_patch(self, state: 'PipelineState'):
+        """Хирургический редактор статьи (замена полной перепиписи в цикле ревизий).
+
+        Правит только проблемные H2-разделы, сохраняя цельность; при широких
+        правках/сбое откатывается к _step_combined_revision.
+        """
+        import os
+        import re as _re
+        if os.getenv("HEART_PATCH_ENABLED", "true").lower() not in ("1", "true", "yes", "on"):
+            return self._step_combined_revision(state)
+
+        draft = state.draft or ""
+        sections = self._split_markdown_sections(draft)
+        editable = [i for i, b in enumerate(sections) if b["level"] == 2]
+        if len(editable) < 2:
+            logger.info("   ℹ️ Мало H2-разделов для хирургии — полная ревизия.")
+            return self._step_combined_revision(state)
+
+        plan = self._build_edit_plan(state, sections)
+        if not plan:
+            logger.info("   ℹ️ План правок пуст/нечитаем — полная ревизия.")
+            return self._step_combined_revision(state)
+
+        flagged = sorted({p["section_index"] for p in plan})
+        if len(flagged) / max(1, len(editable)) > 0.5:
+            logger.info(f"   ℹ️ Правок много ({len(flagged)}/{len(editable)} > 50%) — полная ревизия.")
+            return self._step_combined_revision(state)
+
+        instr_by_idx = {}
+        for p in plan:
+            instr_by_idx.setdefault(p["section_index"], []).append(p["instruction"])
+
+        new_sections = list(sections)
+        changed = 0
+        for i in flagged:
+            sec = sections[i]
+            prev_raw = sections[i - 1]["raw"] if i - 1 >= 0 else ""
+            next_raw = sections[i + 1]["raw"] if i + 1 < len(sections) else ""
+            prev_tail = prev_raw.strip()[-400:]
+            next_head = next_raw.strip()[:400]
+            instruction = "\n".join(f"- {t}" for t in instr_by_idx.get(i, []) if t)
+            rewritten = self._rewrite_section(state, sec, prev_tail, next_head, instruction)
+            if self._section_ok(sec, rewritten):
+                trailing = sec["raw"][len(sec["raw"].rstrip()):]  # сохранить исходный хвост (\n\n)
+                new_sections[i] = {**sec, "raw": rewritten.rstrip() + trailing}
+                changed += 1
+            else:
+                logger.warning(f"   ⚠️ Раздел [{i}] переписан некорректно — оставляю оригинал.")
+
+        if changed == 0:
+            logger.info("   ℹ️ Ни один раздел не изменён — полная ревизия (fallback).")
+            return self._step_combined_revision(state)
+
+        new_draft = self._reassemble_sections(new_sections)
+
+        h2_before = len(_re.findall(r"(?m)^##\s", draft))
+        h2_after = len(_re.findall(r"(?m)^##\s", new_draft))
+        if h2_after < h2_before or len(new_draft) < len(draft) * 0.6:
+            logger.warning(
+                f"   ⚠️ Структура нарушена (H2 {h2_before}→{h2_after}, "
+                f"объём {len(draft)}→{len(new_draft)}). Откат к полной ревизии."
+            )
+            return self._step_combined_revision(state)
+
+        state.draft = new_draft
+        state.sheriff_iterations += 1
+        logger.info(
+            f"   🩹 Хирургические правки: {changed} из {len(editable)} разделов; "
+            f"объём {len(draft)}→{len(new_draft)} символов."
+        )
+
+    def _get_sheriff_guidance(self, state: 'PipelineState') -> str:
+        """Чек-лист для Sheriff: инструкция из стиля (приоритет) + чек-лист паттерна.
+
+        Раньше sheriff_instruction (styles_config) и sheriff_checklist (patterns)
+        НЕ доходили до агента. Теперь подмешиваются в его запрос.
+        """
+        parts = []
+        sid = getattr(state, "style_id", "") or ""
+        if sid:
+            try:
+                from .styles import get_style
+                st = get_style(sid)
+                instr = getattr(st, "sheriff_instruction", None)
+                if instr:
+                    parts.append(instr.strip())
+            except Exception:
+                pass
+        key = sid if sid in PATTERNS else getattr(state, "article_type", "")
+        pat = PATTERNS.get(key) or PATTERNS.get(getattr(state, "article_type", ""), {})
+        if isinstance(pat, dict):
+            chk = pat.get("sheriff_checklist")
+            if chk and chk.strip() not in parts:
+                parts.append(chk.strip())
+        if not parts:
+            return ""
+        return (
+            "\n\nОБЯЗАТЕЛЬНЫЙ ЧЕК-ЛИСТ ПРОВЕРКИ (учти КАЖДЫЙ пункт в вердикте и комментариях):\n- "
+            + "\n- ".join(parts)
+        )
+
     def _step_sheriff(self, state: PipelineState):
         """Шериф (Редактор) — проверка качества и фактов."""
         logger.info("👮 [6/8] Sheriff: проверка черновика статьи...")
+        guidance = self._get_sheriff_guidance(state)
         user_msg = (
             f"ТЕМА СТАТЬИ: {state.topic}\n"
             f"ЧЕРНОВИК СТАТЬИ:\n{state.draft}\n\n"
             f"Выполни строгую проверку качества черновика."
+            f"{guidance}"
         )
         response = self._call_agent("sheriff", user_msg, parse_json=True, state=state)
         state.sheriff_review = response
@@ -1151,7 +1549,7 @@ class Pipeline:
             logger.info("   🎨 Маркеры картинок не найдены в тексте. Вставляем их автоматически...")
             h2_matches = list(re.finditer(r'^##\s+(.*?)$', article_text, re.MULTILINE))
             if h2_matches:
-                if state.article_type == "checklist":
+                if state.style_id == "checklist":
                     target_indices = [3, 5, 7, 9]
                     inserted_count = 0
                     new_text = ""
@@ -1237,7 +1635,7 @@ class Pipeline:
                 "Content-Type": "application/json"
             }
             
-            def _generate_image_with_fallback(prompt: str, size: str, model: str = "gpt-image-2") -> Any:
+            def _generate_image_with_fallback(prompt: str, size: str, model: str = MODELS["openai_image_primary"]) -> Any:
                 """Внутренний хелпер для генерации картинок с авто-фолбеком на DALL-E 3."""
                 payload = {
                     "model": model,
@@ -1252,8 +1650,8 @@ class Pipeline:
                         resp.raise_for_status()
                         return resp.json()
                 except Exception as err:
-                    if model == "gpt-image-2":
-                        fallback_model = "dall-e-3"
+                    if model == MODELS["openai_image_primary"]:
+                        fallback_model = MODELS["openai_image_fallback"]
                         fallback_size = "1792x1024"
                         logger.warning(f"   ⚠️ Ошибка {model} ({size}): {err}. Пробуем оригинальный {fallback_model} ({fallback_size})...")
                         fallback_payload = {
@@ -1281,7 +1679,7 @@ class Pipeline:
                 f"The text must be the primary design element and perfectly integrated, with absolutely zero grammatical or spelling errors."
             )
             
-            cover_data = _generate_image_with_fallback(full_cover_prompt, "1536x768", "gpt-image-2")
+            cover_data = _generate_image_with_fallback(full_cover_prompt, "1536x768", MODELS["openai_image_primary"])
             logger.info(f"   🔍 DEBUG: Сырой ответ API (обложка): {cover_data}")
             cover_path = images_dir / "main.png"
             if not _save_image_from_response(cover_data, cover_path):
@@ -1298,7 +1696,7 @@ class Pipeline:
                     f"High contrast, beautiful lighting, wide landscape format."
                 )
                 
-                sec_data = _generate_image_with_fallback(full_section_prompt, "1536x384", "gpt-image-2")
+                sec_data = _generate_image_with_fallback(full_section_prompt, "1536x384", MODELS["openai_image_primary"])
                 logger.info(f"   🔍 DEBUG: Сырой ответ API (разделитель {idx+1}): {sec_data}")
                 sec_path = images_dir / f"section_{idx+1}.png"
                 if not _save_image_from_response(sec_data, sec_path):
@@ -1332,10 +1730,11 @@ class Pipeline:
 
     def _apply_smart_hard_cut(self, state: PipelineState):
         """
-        Интеллектуальный спасательный механизм сжатия и очистки от воды.
-        Если финальная статья превышает динамический лимит объема,
-        система сжимает её через LLM с сохранением H2-заголовков и структуры.
+        Аварийный спасательный механизм (Умный структурный hard-cut).
+        Если финальная статья превышает лимит символов более чем на 20%,
+        система аккуратно сжимает или обрезает ее.
         """
+        # Работаем с final_article, если она пустая - берем draft
         source_text = state.final_article if state.final_article else state.draft
         if not source_text:
             return
@@ -1349,37 +1748,34 @@ class Pipeline:
                 except Exception:
                     pass
         if not target:
+            # Если целевой объем не задан, берем из паттернов
             from .patterns import PATTERNS
-            target = PATTERNS.get(state.article_type, PATTERNS.get("free_style", {})).get("target_chars", 8000)
+            pattern = PATTERNS.get(state.article_type, PATTERNS.get("free_style", {}))
+            target = pattern.get("target_chars", 8000)
 
-        # Вычисляем динамический margin
-        if target < 5000:
-            margin_pct = 0.30
-        else:
-            margin_pct = 0.20
-
-        limit = int(target * (1.0 + margin_pct))
+        limit = int(target * 1.2)  # Допускаем перебор до 20%
         if len(source_text) <= limit:
             if not state.final_article:
                 state.final_article = source_text
             return
 
-        logger.info(f"   ⚠️ [Intelligent Reduction] Статья превышает лимит ({len(source_text)} > {limit} симв.). Запускаю интеллектуальное сжатие...")
-
-        # Запускаем интеллектуальное сжатие через LLM
-        condensed = self._heart_condense(state, source_text, target)
-        
-        # Если сжатие прошло успешно и мы уложились в лимит
-        if len(condensed) < len(source_text) and len(condensed) <= limit:
-            logger.info(f"   ✅ [Intelligent Reduction] Статья успешно сжата с помощью LLM до {len(condensed)} символов.")
-            state.final_article = condensed
+        # Если тип статьи checklist или reference, грубая обрезка разделов запрещена, так как она разрушает структуру (удаляет пункты).
+        # Вместо этого мы пытаемся сжать статью через Писателя (condense) и в любом случае завершаем обработку.
+        if state.style_id in ("checklist", "reference"):
+            logger.info("   ⚠️ [Hard-Cut] Для чек-листов и справочников грубая обрезка запрещена. Запускаю вежливое сжатие (condense)...")
+            condensed = self._heart_condense(state, source_text, target)
+            if len(condensed) < len(source_text) and len(condensed) > target * 0.5:
+                source_text = condensed
+                logger.info(f"   ✅ [Hard-Cut] Статья успешно сжата до {len(source_text)} символов.")
+            else:
+                logger.warning("   ⚠️ [Hard-Cut] Не удалось эффективно сжать статью. Во избежание поломки структуры оставляем исходный текст.")
+            state.final_article = source_text
             return
-        
-        # Если LLM не справилась (или вернула некорректный размер), 
-        # применяем резервный аккуратный срез по структуре (fallback)
-        logger.warning("   ⚠️ [Intelligent Reduction] Сжатие LLM не уложилось в лимит. Применяю резервное структурное сокращение...")
-        
-        cutoff_limit = limit
+
+        logger.warning(f"   ✂️ [Hard-Cut] Статья слишком длинная ({len(source_text)} символов). Лимит: {limit}. Обрезаю...")
+
+        # Определяем точку отсечения
+        cutoff_limit = int(target * 1.1)  # Пытаемся отсечь ближе к 110%
         cutoff_text = source_text[:cutoff_limit]
 
         # Ищем последний заголовок ## или H3/H2 в пределах cutoff_limit
@@ -1387,24 +1783,27 @@ class Pipeline:
         if last_section == -1:
             last_section = cutoff_text.rfind('\n### ')
         
+        # Если нашли заголовок и он занимает хотя бы 40% текста (не слишком рано обрываем)
         if last_section > target * 0.4:
             source_text = cutoff_text[:last_section].rstrip()
-            logger.info(f"   ✂️ [Fallback Cut] Текст обрезан по заголовку раздела. Новый объем: {len(source_text)} символов.")
+            logger.info(f"   ✂️ [Hard-Cut] Текст обрезан по заголовку раздела. Новый объем: {len(source_text)} символов.")
         else:
+            # Иначе ищем конец последнего абзаца перед лимитом
             last_paragraph = cutoff_text.rfind('\n\n')
             if last_paragraph > target * 0.4:
                 source_text = cutoff_text[:last_paragraph].rstrip()
-                logger.info(f"   ✂️ [Fallback Cut] Текст обрезан по концу абзаца. Новый объем: {len(source_text)} символов.")
+                logger.info(f"   ✂️ [Hard-Cut] Текст обрезан по концу абзаца. Новый объем: {len(source_text)} символов.")
             else:
+                # В крайнем случае обрезаем по предложению
                 last_sentence = max(cutoff_text.rfind('. '), cutoff_text.rfind('! '), cutoff_text.rfind('? '))
                 if last_sentence > target * 0.3:
                     source_text = cutoff_text[:last_sentence + 1].rstrip()
-                    logger.info(f"   ✂️ [Fallback Cut] Текст обрезан по предложению. Новый объем: {len(source_text)} символов.")
+                    logger.info(f"   ✂️ [Hard-Cut] Текст обрезан по предложению. Новый объем: {len(source_text)} символов.")
                 else:
                     source_text = cutoff_text.rstrip()
-                    logger.info(f"   ✂️ [Fallback Cut] Грубая обрезка текста. Новый объем: {len(source_text)} символов.")
+                    logger.info(f"   ✂️ [Hard-Cut] Грубая обрезка текста. Новый объем: {len(source_text)} символов.")
 
-        # Генерируем адекватное завершение
+        # Генерируем адекватное завершение через Heart (если текст обрезан)
         if len(source_text) > 500:
             try:
                 last_300 = source_text[-300:]
@@ -1418,8 +1817,8 @@ class Pipeline:
                 if closing and isinstance(closing, str) and len(closing.strip()) < 300:
                     source_text += "\n\n## ИТОГ\n\n" + closing.strip()
             except Exception as e:
-                logger.warning(f"   ⚠️ [Fallback Cut] Не удалось сгенерировать заключение: {e}")
-                
+                logger.warning(f"   ⚠️ [Hard-Cut] Не удалось сгенерировать заключение: {e}")
+        logger.info(f"   ✂️ [Hard-Cut] Финал после hard-cut: {len(source_text)} символов.")
         state.final_article = source_text
 
     def _clean_leaked_ai_artifacts(self, text: str) -> str:
@@ -1458,6 +1857,74 @@ class Pipeline:
     # ────────────────────────────────────────────
     # Вспомогательные методы
     # ────────────────────────────────────────────
+
+    def _chat_completion(self, client, *, response_format=None, **kwargs):
+        """chat.completions.create с retry/backoff на транзиентных ошибках.
+
+        Повторяет ТОЛЬКО временные сбои (429 rate limit, таймаут, разрыв
+        соединения, 5xx). Ошибки клиента (4xx, кроме 429) поднимаются сразу.
+        Если провайдер не понимает response_format — один раз повторяет без него.
+        Чистый stdlib, без внешних зависимостей.
+        """
+        import os, time, random
+        try:
+            from openai import (
+                RateLimitError, APITimeoutError, APIConnectionError,
+                InternalServerError, APIError, BadRequestError,
+            )
+        except Exception:  # на случай иной версии SDK — деградируем без ретраев
+            RateLimitError = APITimeoutError = APIConnectionError = ()
+            InternalServerError = BadRequestError = ()
+            APIError = ()
+
+        max_retries = int(os.getenv("AGENT_MAX_RETRIES", "3"))
+        base_delay = float(os.getenv("AGENT_RETRY_BASE_DELAY", "2"))
+        max_delay = float(os.getenv("AGENT_RETRY_MAX_DELAY", "30"))
+        use_rf = (
+            response_format is not None
+            and os.getenv("AGENT_JSON_MODE", "true").lower() in ("1", "true", "yes", "on")
+        )
+
+        attempt = 0
+        while True:
+            call_kwargs = dict(kwargs)
+            if use_rf:
+                call_kwargs["response_format"] = response_format
+            try:
+                return client.chat.completions.create(**call_kwargs)
+            except BadRequestError as e:
+                # Обычно = провайдер не поддерживает response_format → повтор без JSON-mode
+                if use_rf:
+                    logger.warning(f"   ⚠️ response_format не поддержан ({e}); повтор без JSON-mode")
+                    use_rf = False
+                    continue
+                raise
+            except (RateLimitError, APITimeoutError, APIConnectionError, InternalServerError) as e:
+                attempt += 1
+                if attempt > max_retries:
+                    logger.error(f"   ❌ API недоступен после {max_retries} повторов: {e}")
+                    raise
+                delay = min(max_delay, base_delay * (2 ** (attempt - 1))) + random.uniform(0, 1)
+                logger.warning(
+                    f"   ⏳ Транзиентная ошибка ({type(e).__name__}); "
+                    f"повтор {attempt}/{max_retries} через {delay:.1f}s"
+                )
+                time.sleep(delay)
+            except APIError as e:
+                # Серверные 5xx — повторяем; остальное — поднимаем
+                status = getattr(e, "status_code", None)
+                if status is not None and status >= 500:
+                    attempt += 1
+                    if attempt > max_retries:
+                        logger.error(f"   ❌ Сервер {status} после {max_retries} повторов: {e}")
+                        raise
+                    delay = min(max_delay, base_delay * (2 ** (attempt - 1))) + random.uniform(0, 1)
+                    logger.warning(
+                        f"   ⏳ Серверная ошибка {status}; повтор {attempt}/{max_retries} через {delay:.1f}s"
+                    )
+                    time.sleep(delay)
+                else:
+                    raise
 
     def _call_agent(
         self,
@@ -1520,17 +1987,31 @@ class Pipeline:
             custom_model = getattr(state, "model", None)
             
             if provider == "kie":
+                if self.kie_client is None:
+                    raise RuntimeError(
+                        "Выбран provider=\"kie\", но KIE_API_KEY не задан в окружении (.env)."
+                    )
                 current_client = self.kie_client
-                model_name = custom_model if custom_model else "claude-4.7"
+                model_name = custom_model if custom_model else MODELS["kie_text"]
             elif provider == "openai":
                 current_client = self.openai_client
-                model_name = custom_model if custom_model else "gpt-4o"
+                model_name = custom_model if custom_model else MODELS["openai_text"]
             elif provider == "deepseek":
                 current_client = self.deepseek_client
                 if custom_model:
                     model_name = custom_model
 
-        response = current_client.chat.completions.create(
+        # JSON-mode (response_format) только для агентов, чей ответ парсится как JSON.
+        # Если провайдер его не поддержит — _chat_completion повторит без него.
+        response_format = {"type": "json_object"} if parse_json else None
+        if parse_json and "json" not in extended_system_prompt.lower():
+            extended_system_prompt += (
+                "\n\nВерни ответ СТРОГО как один валидный JSON-объект, без markdown-ограждения."
+            )
+
+        response = self._chat_completion(
+            current_client,
+            response_format=response_format,
             model=model_name,
             messages=[
                 {"role": "system", "content": extended_system_prompt},
@@ -1565,23 +2046,64 @@ class Pipeline:
         return raw
 
     def _parse_json_response(self, raw: str, agent_id: str) -> Dict:
-        """Извлечь JSON из ответа агента (с обработкой markdown)."""
-        import re
-        cleaned = re.sub(r'^```(?:json)?\s*', '', raw)
-        cleaned = re.sub(r'\s*```$', '', cleaned)
+        """Извлечь JSON из ответа агента. Устойчиво к markdown/мусору; не бросает.
 
-        try:
-            return json.loads(cleaned)
-        except json.JSONDecodeError:
-            # Пробуем найти JSON внутри текста
-            match = re.search(r'\{[\s\S]*\}', raw)
-            if match:
-                try:
-                    return json.loads(match.group())
-                except json.JSONDecodeError:
-                    pass
-            logger.warning(f"⚠️ [{agent_id}] не удалось распарсить JSON, возвращаю как текст")
-            return {"raw_response": raw}
+        Стратегия: (1) снять ```json``` ограждение; (2) прямой json.loads;
+        (3) сбалансированный поиск первого {...}-объекта с учётом строк/экранов;
+        (4) терпимость к висячим запятым. Последний шаг — {"raw_response": raw}.
+        """
+        import re
+
+        def _try(s):
+            try:
+                return json.loads(s)
+            except Exception:
+                return None
+
+        if not raw:
+            return {"raw_response": ""}
+
+        cleaned = re.sub(r"^```(?:json)?\s*", "", raw.strip())
+        cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+        for candidate in (cleaned, raw):
+            obj = _try(candidate)
+            if isinstance(obj, dict):
+                return obj
+
+        # Сбалансированный разбор: ищем первый завершённый объект {...}
+        start = raw.find("{")
+        while start != -1:
+            depth = 0
+            in_str = False
+            esc = False
+            for i in range(start, len(raw)):
+                ch = raw[i]
+                if in_str:
+                    if esc:
+                        esc = False
+                    elif ch == "\\":
+                        esc = True
+                    elif ch == '"':
+                        in_str = False
+                    continue
+                if ch == '"':
+                    in_str = True
+                elif ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        snippet = raw[start:i + 1]
+                        obj = _try(snippet)
+                        if obj is None:
+                            obj = _try(re.sub(r",(\s*[}\]])", r"\1", snippet))
+                        if isinstance(obj, dict):
+                            return obj
+                        break
+            start = raw.find("{", start + 1)
+
+        logger.warning(f"⚠️ [{agent_id}] не удалось распарсить JSON, возвращаю как текст")
+        return {"raw_response": raw}
 
     def _get_style_block(self, state: PipelineState = None) -> str:
         """
@@ -1622,53 +2144,3 @@ class Pipeline:
                 lines.append(f"- Сигналы экспертности: {', '.join(self.style['expertise_signals'])}")
 
         return "\n".join(lines) + "\n\n"
-
-    def _validate_final(self, state: PipelineState) -> list:
-        """
-        Финальная валидация статьи (без API).
-        Проверяет наличие штампов и лимиты объема с учетом динамического маржина.
-        """
-        warnings = []
-        text = state.final_article or state.draft
-        if not text:
-            warnings.append("⚠️ Финальный текст статьи пуст.")
-            return warnings
-
-        # 1. Проверка на стоп-слова
-        from .stopwords import ALL_STOP_WORDS
-        lower_text = text.lower()
-        found_words = [w for w in ALL_STOP_WORDS if w in lower_text]
-        if found_words:
-            unique_words = list(set(found_words))
-            warnings.append(f"⚠️ В финальной статье обнаружены стоп-слова: {unique_words[:10]}")
-
-        # 2. Проверка объема
-        target = state.custom_chars
-        if not target:
-            if state.style_id:
-                try:
-                    from .styles import get_style
-                    target = get_style(state.style_id).target_chars
-                except Exception:
-                    pass
-        if not target:
-            from .patterns import PATTERNS
-            target = PATTERNS.get(state.article_type, PATTERNS.get("free_style", {})).get("target_chars", 8000)
-
-        # Вычисляем динамический margin
-        if target < 5000:
-            margin_pct = 0.30
-        else:
-            margin_pct = 0.20
-
-        min_allowed = int(target * (1.0 - margin_pct))
-        max_allowed = int(target * (1.0 + margin_pct))
-        actual = len(text)
-
-        if actual < min_allowed:
-            warnings.append(f"⚠️ Объем статьи ({actual} симв.) ниже допустимого минимума ({min_allowed} симв., допуск -{int(margin_pct*100)}%).")
-        elif actual > max_allowed:
-            warnings.append(f"⚠️ Объем статьи ({actual} симв.) выше допустимого максимума ({max_allowed} симв., допуск +{int(margin_pct*100)}%).")
-
-        return warnings
-
