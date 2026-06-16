@@ -19,3 +19,7 @@ qdrant-client>=1.12.0
 # Утилиты
 python-dotenv>=1.0.1
 tqdm>=4.67.0
+
+# Рендер статьи в HTML (Markdown → HTML)
+markdown>=3.5
+requests>=2.31.0
