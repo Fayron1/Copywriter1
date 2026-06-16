@@ -55,14 +55,56 @@ def slugify(text: str, max_len: int = 40) -> str:
     return slug[:max_len]
 
 
+def _normalize_article_markdown(text: str) -> str:
+    """Восстановить блочную структуру Markdown перед конвертацией в HTML.
+
+    Агенты-редакторы нередко возвращают текст, где пустые строки между блоками
+    схлопнуты в один перевод строки (а то и вовсе склеены). Без пустых строк
+    парсер Markdown не распознаёт заголовки/списки и выдаёт «сплошной текст».
+    Здесь мы гарантируем пустую строку до и после каждого заголовка и перед
+    началом списка, а также схлопываем лишние переводы строк.
+    """
+    if not text:
+        return ""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+
+    def _is_heading(line: str) -> bool:
+        return bool(re.match(r'^\s{0,3}#{1,6}\s', line))
+
+    def _is_list(line: str) -> bool:
+        return bool(re.match(r'^\s*(?:[-*+]|\d+[.)])\s', line))
+
+    def _is_blank(line: str) -> bool:
+        return line.strip() == ""
+
+    out: list = []
+    for line in text.split("\n"):
+        if _is_heading(line):
+            if out and not _is_blank(out[-1]):
+                out.append("")
+            out.append(line.strip())
+            out.append("")
+        elif _is_list(line):
+            if out and not _is_blank(out[-1]) and not _is_list(out[-1]):
+                out.append("")
+            out.append(line)
+        else:
+            out.append(line)
+
+    normalized = "\n".join(out)
+    normalized = re.sub(r'\n{3,}', '\n\n', normalized)
+    return normalized.strip()
+
+
 def save_html_preview(state, output_dir: Path):
     """Сгенерировать красивый, адаптивный HTML-просмотрщик статьи (дизайн 'НЕЙРОЦЕХ / Журнальный разворот')."""
     article_content = state.final_article or state.draft or ""
     if not article_content:
         return
 
-    # Нормализуем переводы строк для совместимости Windows/Linux и надежной работы парсера
-    article_content = article_content.replace("\r\n", "\n")
+    # Нормализуем переводы строк и восстанавливаем блочную структуру Markdown
+    # (заголовки/списки), чтобы парсер не выдавал «сплошной текст».
+    article_content = _normalize_article_markdown(article_content)
 
     # Определение человеческого типа статьи
     type_names = {
@@ -138,8 +180,12 @@ def save_html_preview(state, output_dir: Path):
     html_body = ""
     try:
         import markdown
-        # Использование официального парсера с таблицами
-        html_body = markdown.markdown(article_content, extensions=['tables', 'fenced_code', 'nl2br'])
+        # Официальный парсер. Без 'nl2br' (он превращал одиночные переводы строк
+        # в <br> и ломал структуру); 'sane_lists' — корректные списки.
+        html_body = markdown.markdown(
+            article_content,
+            extensions=['tables', 'fenced_code', 'sane_lists'],
+        )
     except ImportError:
         # Простой встроенный регулярный парсер (чтобы работало без пипа)
         html = article_content
@@ -162,10 +208,12 @@ def save_html_preview(state, output_dir: Path):
         # Цитаты
         html = re.sub(r'^&gt;\s+(.*?)$', r'<blockquote class="border-l-4 border-primary pl-4 my-4 italic text-textMuted">\1</blockquote>', html, flags=re.MULTILINE)
         
-        # Списки
-        html = re.sub(r'^\s*-\s+(.*?)$', r'<li class="list-disc ml-4">\1</li>', html, flags=re.MULTILINE)
-        html = re.sub(r'^\s*\*\s+(.*?)$', r'<li class="list-disc ml-4">\1</li>', html, flags=re.MULTILINE)
-        html = re.sub(r'^\s*\d+\.\s+(.*?)$', r'<li class="list-decimal ml-4">\1</li>', html, flags=re.MULTILINE)
+        # Списки. ВАЖНО: на старте строки используем [ \t]*, а НЕ \s* — иначе
+        # \s* «съедает» предыдущую пустую строку (\n входит в \s) и приклеивает
+        # список к абзацу выше, ломая разбиение на блоки.
+        html = re.sub(r'^[ \t]*-[ \t]+(.*?)$', r'<li class="list-disc ml-4">\1</li>', html, flags=re.MULTILINE)
+        html = re.sub(r'^[ \t]*\*[ \t]+(.*?)$', r'<li class="list-disc ml-4">\1</li>', html, flags=re.MULTILINE)
+        html = re.sub(r'^[ \t]*\d+\.[ \t]+(.*?)$', r'<li class="list-decimal ml-4">\1</li>', html, flags=re.MULTILINE)
         
         # Разделение по абзацам с нормализацией пустых строк с пробелами/табами
         html = re.sub(r'\n\s*\n', '\n\n', html)
@@ -174,7 +222,12 @@ def save_html_preview(state, output_dir: Path):
             p_strip = p.strip()
             if not p_strip:
                 continue
-            if not p_strip.startswith('<h') and not p_strip.startswith('<blockquote') and not p_strip.startswith('<ul') and not p_strip.startswith('<ol') and not p_strip.startswith('<li') and not p_strip.startswith('<img') and not p_strip.startswith('<table'):
+            # Блок целиком из <li> — оборачиваем в <ul>/<ol> (иначе список «висит» в воздухе)
+            if p_strip.startswith('<li'):
+                tag = 'ol' if 'list-decimal' in p_strip.split('>', 1)[0] else 'ul'
+                paragraphs[i] = f'<{tag} class="my-4">\n{p_strip}\n</{tag}>'
+                continue
+            if not p_strip.startswith('<h') and not p_strip.startswith('<blockquote') and not p_strip.startswith('<ul') and not p_strip.startswith('<ol') and not p_strip.startswith('<img') and not p_strip.startswith('<table'):
                 paragraphs[i] = f'<p class="mb-4 text-justify leading-relaxed">{p_strip}</p>'
         html_body = "\n\n".join(paragraphs)
         
