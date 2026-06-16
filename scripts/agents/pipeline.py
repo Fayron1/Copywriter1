@@ -263,6 +263,7 @@ class PipelineState:
     direction: str = ""
     style_id: str = ""                  # ID стиля из styles.py
     custom_chars: int = 0               # Пользовательский объём (из дашборда)
+    target_chars: int = 0               # Эффективный целевой объём (для адаптивных решений по токенам)
     output_dir: str = ""                # Папка для сохранения результатов (включая картинки)
     seo_budget: int = 0                 # Бюджет символов для Booster (SEO-резерв)
 
@@ -523,8 +524,11 @@ class Pipeline:
             self._step_heart(state)
             self._log_draft_length("Heart (Черновик)", state.draft)
 
-            # 6. Объединённый review loop (Sheriff + условный Mirror → единая ревизия)
-            for i in range(2):  # макс. 2 итерации объединённого review
+            # 6. Объединённый review loop (Sheriff + условный Mirror → единая ревизия).
+            # Для небольших статей достаточно одного прохода — это главный рычаг
+            # экономии токенов без потери качества; для лонгридов оставляем до 2.
+            review_iters = 1 if (state.target_chars and state.target_chars <= 8000) else 2
+            for i in range(review_iters):
                 # Sheriff проверяет
                 self._step_sheriff(state)
                 sheriff_verdict = state.sheriff_review.get("verdict", "revision_needed")
@@ -535,13 +539,14 @@ class Pipeline:
                     except (ValueError, TypeError):
                         sheriff_score = 0
 
-                # Mirror проверяет ТОЛЬКО если Sheriff не дал высокий балл
+                # Mirror проверяет ТОЛЬКО если Sheriff не одобрил и балл невысокий
+                # (если Sheriff уже одобрил — лишний полный прогон текста не нужен).
                 mirror_verdict = "pass"
-                if sheriff_score < 85:
+                if sheriff_verdict != "approved" and sheriff_score < 85:
                     self._step_mirror(state)
                     mirror_verdict = state.mirror_review.get("verdict", "pass")
                 else:
-                    logger.info(f"   ⏭️ Mirror пропущен (Turing Score: {sheriff_score} ≥ 85)")
+                    logger.info(f"   ⏭️ Mirror пропущен (вердикт Sheriff: {sheriff_verdict}, Turing Score: {sheriff_score})")
 
                 # Если оба одобрили — выходим
                 if sheriff_verdict == "approved" and mirror_verdict == "pass":
@@ -716,15 +721,15 @@ class Pipeline:
             f"Тип статьи: {state.article_type}\n"
             f"Направление: {state.direction}\n\n"
             f"ЭТАЛОННАЯ СТРУКТУРА:\n{engineer_inst}\n\n"
-            f"ФАКТЫ ОТ ИССЛЕДОВАТЕЛЯ:\n{json.dumps(state.facts, ensure_ascii=False, indent=2)}\n\n"
-            f"УГОЛ ПОДАЧИ ОТ РАЗВЕДЧИКА:\n{json.dumps(state.scout_data, ensure_ascii=False, indent=2)}\n\n"
+            f"ФАКТЫ ОТ ИССЛЕДОВАТЕЛЯ:\n{self._compact_json(state.facts, 5000)}\n\n"
+            f"УГОЛ ПОДАЧИ ОТ РАЗВЕДЧИКА:\n{self._compact_json(state.scout_data, 2500)}\n\n"
             f"Создай детальный Blueprint."
         )
 
         # RAG — шаблоны и фреймворки
         chunks = query_knowledge(f"шаблон {state.article_type}", "engineer", self.qdrant)
         if chunks:
-            user_msg += f"\n\n{format_rag_context(chunks, max_chars=4000)}"
+            user_msg += f"\n\n{format_rag_context(chunks, max_chars=2500)}"
 
         state.blueprint = self._call_agent("engineer", user_msg, state=state)
         
@@ -777,6 +782,7 @@ class Pipeline:
             target_chars = 8000
         if not max_chars:
             max_chars = int(target_chars * 1.15)
+        state.target_chars = target_chars
 
         # SEO-резерв: 7% бюджета для Booster
         seo_reserve_pct = 0.07
@@ -857,13 +863,27 @@ class Pipeline:
         state.steps_completed.append("heart")
         logger.info(f"   🎯 Draft: {len(state.draft)} символов")
 
+    def _compact_json(self, obj, limit: int = 4000) -> str:
+        """Компактный JSON без отступов с ограничением длины.
+
+        indent=2 раздувал входные токены почти вдвое (пробелы/переводы строк);
+        для передачи модели структура читается и без них.
+        """
+        try:
+            s = json.dumps(obj, ensure_ascii=False)
+        except Exception:
+            s = str(obj)
+        if len(s) > limit:
+            s = s[:limit] + " …"
+        return s
+
     def _heart_single(self, state, style_block, rag_block, target_chars):
         """Heart: генерация статьи одним вызовом."""
         min_chars = int(target_chars * 0.9)
         max_chars = int(target_chars * 1.1)
         user_msg = (
-            f"BLUEPRINT ОТ СТРУКТУРИРОВЩИКА:\n{json.dumps(state.blueprint, ensure_ascii=False, indent=2)}\n\n"
-            f"ФАКТЫ ОТ ИССЛЕДОВАТЕЛЯ:\n{json.dumps(state.facts, ensure_ascii=False, indent=2)}\n\n"
+            f"BLUEPRINT ОТ СТРУКТУРИРОВЩИКА:\n{self._compact_json(state.blueprint, 5000)}\n\n"
+            f"ФАКТЫ ОТ ИССЛЕДОВАТЕЛЯ:\n{self._compact_json(state.facts, 5000)}\n\n"
             f"{style_block}\n\n"
             f"⚠️ СТРОГОЕ ТРЕБОВАНИЕ К ОБЪЕМУ:\n"
             f"- Точный диапазон: от {min_chars} до {max_chars} символов\n"
@@ -1081,11 +1101,11 @@ class Pipeline:
         """Heart — доработка по фидбеку Sheriff."""
         logger.info("✍️ Heart: доработка по фидбеку Sheriff...")
         original_len = len(state.draft)
-        target_chars = state.custom_chars or 8000
+        target_chars = state.target_chars or state.custom_chars or 8000
         
         user_msg = (
             f"ЧЕРНОВИК СТАТЬИ:\n{state.draft}\n\n"
-            f"ФИДБЕК ОТ РЕДАКТОРА (Sheriff):\n{json.dumps(state.sheriff_review, ensure_ascii=False, indent=2)}\n\n"
+            f"ФИДБЕК ОТ РЕДАКТОРА (Sheriff):\n{self._compact_json(state.sheriff_review, 3000)}\n\n"
             f"Внеси исправления, но не меняй структуру. Верни полный текст статьи."
         )
         result = self._generate_clean_heart_text(user_msg, target_chars=target_chars)
@@ -1096,11 +1116,11 @@ class Pipeline:
         """Heart — humanization по фидбеку Mirror."""
         logger.info("✍️ Heart: humanization...")
         original_len = len(state.draft)
-        target_chars = state.custom_chars or 8000
+        target_chars = state.target_chars or state.custom_chars or 8000
         
         user_msg = (
             f"ЧЕРНОВИК СТАТЬИ:\n{state.draft}\n\n"
-            f"ФИДБЕК ОТ ЗЕРКАЛА (Mirror):\n{json.dumps(state.mirror_review, ensure_ascii=False, indent=2)}\n\n"
+            f"ФИДБЕК ОТ ЗЕРКАЛА (Mirror):\n{self._compact_json(state.mirror_review, 3000)}\n\n"
             f"Внеси исправления для слома ИИ-ритма. Верни полный текст статьи."
         )
         result = self._generate_clean_heart_text(user_msg, target_chars=target_chars)
@@ -1111,12 +1131,12 @@ class Pipeline:
         """Heart — объединенная доработка по замечаниям Sheriff и Mirror."""
         logger.info("✍️ Heart: объединенная доработка по замечаниям...")
         original_len = len(state.draft)
-        target_chars = state.custom_chars or 8000
+        target_chars = state.target_chars or state.custom_chars or 8000
         
         user_msg = (
             f"ЧЕРНОВИК СТАТЬИ:\n{state.draft}\n\n"
-            f"ФИДБЕК ОТ РЕДАКТОРА (Sheriff):\n{json.dumps(state.sheriff_review, ensure_ascii=False, indent=2)}\n\n"
-            f"ФИДБЕК ОТ ЗЕРКАЛА (Mirror):\n{json.dumps(state.mirror_review, ensure_ascii=False, indent=2)}\n\n"
+            f"ФИДБЕК ОТ РЕДАКТОРА (Sheriff):\n{self._compact_json(state.sheriff_review, 3000)}\n\n"
+            f"ФИДБЕК ОТ ЗЕРКАЛА (Mirror):\n{self._compact_json(state.mirror_review, 3000)}\n\n"
             f"Внеси все указанные исправления за один проход и верни ВЕСЬ текст статьи целиком."
         )
         result = self._generate_clean_heart_text(user_msg, target_chars=target_chars)
@@ -1182,7 +1202,7 @@ class Pipeline:
                 {"role": "user", "content": user_message},
             ],
             temperature=temperature,
-            max_completion_tokens=max_tokens,
+            max_tokens=max_tokens,
         )
         raw = (resp.choices[0].message.content or "").strip()
         parsed = self._parse_json_response(raw, "edit_planner")
@@ -1266,9 +1286,9 @@ class Pipeline:
                          prev_tail: str, next_head: str, instruction: str) -> str:
         """Переписать ОДИН раздел с контекстом стыков и общим планом."""
         target = int(len(sec["raw"]) * 1.15)
-        bp = json.dumps(getattr(state, "blueprint", {}) or {}, ensure_ascii=False)
-        if len(bp) > 3000:
-            bp = bp[:3000] + " …"
+        # Компактный план: полный блюпринт повторно в каждый раздел шлёт лишние токены;
+        # для стыковки достаточно короткой выжимки.
+        bp = self._compact_json(getattr(state, "blueprint", {}) or {}, 1200)
         msg = (
             f"Ты редактируешь ОДИН раздел статьи, не трогая остальные.\n\n"
             f"ТЕМА СТАТЬИ: {state.topic}\n\n"
@@ -1886,6 +1906,7 @@ class Pipeline:
         )
 
         attempt = 0
+        token_param_swapped = False
         while True:
             call_kwargs = dict(kwargs)
             if use_rf:
@@ -1893,6 +1914,18 @@ class Pipeline:
             try:
                 return client.chat.completions.create(**call_kwargs)
             except BadRequestError as e:
+                emsg = str(e).lower()
+                # Провайдер не принял имя параметра лимита токенов. DeepSeek и большинство
+                # OpenAI-совместимых эндпойнтов ждут max_tokens; reasoning-модели OpenAI —
+                # max_completion_tokens. Меняем имя местами и повторяем один раз.
+                if not token_param_swapped and ("max_tokens" in emsg or "max_completion_tokens" in emsg):
+                    if "max_tokens" in kwargs:
+                        kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
+                    elif "max_completion_tokens" in kwargs:
+                        kwargs["max_tokens"] = kwargs.pop("max_completion_tokens")
+                    token_param_swapped = True
+                    logger.warning(f"   ⚠️ Параметр лимита токенов не принят ({e}); меняю max_tokens↔max_completion_tokens и повторяю")
+                    continue
                 # Обычно = провайдер не поддерживает response_format → повтор без JSON-mode
                 if use_rf:
                     logger.warning(f"   ⚠️ response_format не поддержан ({e}); повтор без JSON-mode")
@@ -2018,7 +2051,7 @@ class Pipeline:
                 {"role": "user", "content": user_message},
             ],
             temperature=agent.temperature,
-            max_completion_tokens=max_tokens_for_call,
+            max_tokens=max_tokens_for_call,
         )
         # Аккумуляция токенов
         if hasattr(response, 'usage') and response.usage:
