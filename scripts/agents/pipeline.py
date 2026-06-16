@@ -782,6 +782,11 @@ class Pipeline:
             target_chars = 8000
         if not max_chars:
             max_chars = int(target_chars * 1.15)
+        # Если оператор задал объём явно (custom_chars), «потолок» считаем ОТ ЭТОГО ЧИСЛА,
+        # а не из стиля (для free_style он 12000 — из-за этого 9000 проходил как норма при
+        # заданных 5000). Это и обеспечивает «5000 = 5000 ±20%».
+        if state.custom_chars:
+            max_chars = int(target_chars * 1.15)
         state.target_chars = target_chars
 
         # SEO-резерв: 7% бюджета для Booster
@@ -1779,20 +1784,59 @@ class Pipeline:
                 state.final_article = source_text
             return
 
-        # Если тип статьи checklist или reference, грубая обрезка разделов запрещена, так как она разрушает структуру (удаляет пункты).
-        # Вместо этого мы пытаемся сжать статью через Писателя (condense) и в любом случае завершаем обработку.
-        if state.style_id in ("checklist", "reference"):
-            logger.info("   ⚠️ [Hard-Cut] Для чек-листов и справочников грубая обрезка запрещена. Запускаю вежливое сжатие (condense)...")
-            condensed = self._heart_condense(state, source_text, target)
-            if len(condensed) < len(source_text) and len(condensed) > target * 0.5:
-                source_text = condensed
-                logger.info(f"   ✅ [Hard-Cut] Статья успешно сжата до {len(source_text)} символов.")
+        # ОСНОВНОЙ механизм — структуро-сохраняющее сжатие (condense), а НЕ обрезка хвоста.
+        # Переписываем текст компактнее, сохраняя ВСЕ разделы H2 и логику. Физическая
+        # обрезка хвоста (ниже) — только аварийный фолбэк, если сжатие не сработало.
+        import re as _re_cut
+        h2_before = len(_re_cut.findall(r'(?m)^##\s', source_text))
+
+        logger.warning(
+            f"   📉 [Trim] Финал {len(source_text)} символов > лимит {limit}. "
+            f"Запускаю умное сжатие (condense, сохраняя структуру)..."
+        )
+        condensed = source_text
+        for attempt in range(2):
+            result = self._heart_condense(state, condensed, target)
+            h2_after = len(_re_cut.findall(r'(?m)^##\s', result))
+            improved = result is not condensed and len(result) < len(condensed)
+            structure_ok = h2_after >= h2_before and len(result) >= target * 0.6
+            if improved and structure_ok:
+                condensed = result
+                logger.info(
+                    f"   ✅ [Trim] Сжато до {len(condensed)} символов "
+                    f"(H2: {h2_before}→{h2_after}, попытка {attempt + 1})."
+                )
+                if len(condensed) <= limit:
+                    break
             else:
-                logger.warning("   ⚠️ [Hard-Cut] Не удалось эффективно сжать статью. Во избежание поломки структуры оставляем исходный текст.")
+                logger.warning(
+                    f"   ⚠️ [Trim] Сжатие не дало результата или затронуло структуру "
+                    f"(H2 {h2_before}→{h2_after}) — прекращаю сжатие."
+                )
+                break
+
+        # Принимаем результат сжатия, если он короче исходного, не слишком ужат и сохранил H2.
+        if (len(condensed) < len(source_text)
+                and len(condensed) >= target * 0.6
+                and len(_re_cut.findall(r'(?m)^##\s', condensed)) >= h2_before):
+            state.final_article = condensed
+            logger.info(f"   ✅ [Trim] Финал после сжатия: {len(condensed)} символов (структура сохранена).")
+            return
+
+        # Сжатие не помогло. Для стилей со строгой структурой обрезка запрещена —
+        # она удалит пункты/разделы. Оставляем текст без обрезки (лучше длиннее, чем «рваный»).
+        if state.style_id in ("checklist", "reference"):
+            logger.warning(
+                "   ⚠️ [Trim] Сжатие не помогло, а обрезка для этого стиля запрещена "
+                "(сломает пункты). Оставляю текст без обрезки."
+            )
             state.final_article = source_text
             return
 
-        logger.warning(f"   ✂️ [Hard-Cut] Статья слишком длинная ({len(source_text)} символов). Лимит: {limit}. Обрезаю...")
+        logger.warning(
+            f"   ✂️ [Hard-Cut] Сжатие не помогло. Аварийная обрезка по границе раздела "
+            f"({len(source_text)} символов, лимит {limit})."
+        )
 
         # Определяем точку отсечения
         cutoff_limit = int(target * 1.1)  # Пытаемся отсечь ближе к 110%
