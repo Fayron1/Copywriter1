@@ -361,20 +361,20 @@ def save_html_preview(state, output_dir: Path):
     <meta name="description" content="{meta_description}">
     <meta name="keywords" content="{keywords_list_meta}">
     <title>{meta_title}</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;600;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Playfair+Display:ital,wght@0,600;0,700;0,800;0,900;1,600&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
     <style>
         :root {
-            --bg-color: #f8fafc;
+            --bg-color: #fdfdfc;
             --surface-color: #ffffff;
-            --text-main: #0f172a;
-            --text-muted: #475569;
-            --primary: #10b981;
-            --primary-light: #ecfdf5;
-            --accent: #3b82f6;
-            --border: #e2e8f0;
-            --shadow: 0 4px 6px -1px rgb(0 0 0 / 0.05), 0 2px 4px -2px rgb(0 0 0 / 0.05);
-            --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.05), 0 4px 6px -4px rgb(0 0 0 / 0.05);
+            --text-main: #1c1917;
+            --text-muted: #57534e;
+            --primary: #78350f;
+            --primary-light: #fef3c7;
+            --accent: #b45309;
+            --border: #e7e5e4;
+            --shadow: 0 4px 20px -2px rgb(120 53 15 / 0.03);
+            --shadow-lg: 0 10px 30px -5px rgb(120 53 15 / 0.05);
         }
 
         .highlight-box {
@@ -498,10 +498,21 @@ def save_html_preview(state, output_dir: Path):
         body {
             background-color: var(--bg-color);
             color: var(--text-main);
-            font-family: 'Inter', sans-serif;
+            font-family: 'Lora', Georgia, serif;
             margin: 0;
             padding: 0;
-            line-height: 1.7;
+            line-height: 1.8;
+        }
+
+        .article-card > p:first-of-type::first-letter {
+            font-family: 'Playfair Display', serif;
+            font-size: 3.2rem;
+            font-weight: 900;
+            float: left;
+            line-height: 0.9;
+            margin-right: 12px;
+            margin-top: 6px;
+            color: var(--primary);
         }
 
         .container {
@@ -571,7 +582,7 @@ def save_html_preview(state, output_dir: Path):
         }
 
         .card-title {
-            font-family: 'Outfit', sans-serif;
+            font-family: 'Playfair Display', serif;
             font-size: 0.875rem;
             font-weight: 700;
             text-transform: uppercase;
@@ -584,7 +595,7 @@ def save_html_preview(state, output_dir: Path):
         }
 
         h1, h2, h3, h4 {
-            font-family: 'Outfit', sans-serif;
+            font-family: 'Playfair Display', Georgia, serif;
             color: var(--text-main);
             font-weight: 700;
         }
