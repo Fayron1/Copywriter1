@@ -68,12 +68,14 @@ MODELS: Dict[str, str] = {
     # DeepSeek — основной провайдер генерации текста
     "deepseek_pro":   os.getenv("MODEL_DEEPSEEK_PRO",   "deepseek-v4-pro"),
     "deepseek_flash": os.getenv("MODEL_DEEPSEEK_FLASH", "deepseek-v4-flash"),
+    # Внешний ревизор для QUALITY_MODE
+    "external_reviewer": os.getenv("MODEL_EXTERNAL_REVIEWER", "gemini-3-pro"),
     # OpenAI — fallback при provider="openai"
     "openai_text":    os.getenv("MODEL_OPENAI_TEXT",    "gpt-4o"),
     # KIE — fallback при provider="kie"
     "kie_text":       os.getenv("MODEL_KIE_TEXT",       "claude-4.7"),
     # Генерация изображений (через OpenAI-совместимый эндпойнт)
-    "openai_image_primary":  os.getenv("MODEL_OPENAI_IMAGE_PRIMARY",  "gpt-image-2"),
+    "openai_image_primary":  os.getenv("MODEL_OPENAI_IMAGE_PRIMARY",  "gpt-image-2-text-to-image"),
     "openai_image_fallback": os.getenv("MODEL_OPENAI_IMAGE_FALLBACK", "dall-e-3"),
 }
 
@@ -81,6 +83,39 @@ MODELS: Dict[str, str] = {
 def get_text_model_ids() -> set:
     """Уникальные ID текстовых моделей, реально используемых агентами."""
     return {a.model for a in AGENTS.values()}
+
+
+# ============================================================
+# Текстовые модели, доступные для выбора (дашборд / CLI --model).
+# Гибрид-роутинг: DeepSeek напрямую, остальные провайдеры — через kie.ai.
+# Списки переопределяются через .env без правки кода.
+# ============================================================
+
+TEXT_MODELS: Dict[str, List[str]] = {
+    # DeepSeek — напрямую (api.deepseek.com)
+    "deepseek": [m.strip() for m in os.getenv(
+        "DEEPSEEK_TEXT_MODELS",
+        f"{MODELS['deepseek_pro']},{MODELS['deepseek_flash']}",
+    ).split(",") if m.strip()],
+    # Прочие LLM — через kie.ai (помодельный путь). Расширяется через env.
+    "kie": [m.strip() for m in os.getenv(
+        "KIE_TEXT_MODELS", f"{MODELS['kie_text']},gpt-5.5",
+    ).split(",") if m.strip()],
+    # OpenAI — оставлен на случай ручного выбора; по умолчанию НЕ используется
+    # (GPT нужен только для эмбеддингов).
+    "openai": [m.strip() for m in os.getenv(
+        "OPENAI_TEXT_MODELS", MODELS["openai_text"],
+    ).split(",") if m.strip()],
+}
+
+
+def get_available_text_models() -> Dict[str, List[str]]:
+    """Провайдер → список выбираемых текстовых моделей (для дашборда/CLI).
+
+    Используется будущим дашбордом для выпадающего списка моделей и
+    CLI-валидации. Гибрид: deepseek напрямую, kie/openai — опционально.
+    """
+    return {provider: list(models) for provider, models in TEXT_MODELS.items()}
 
 
 AGENTS: Dict[str, AgentConfig] = {
@@ -113,7 +148,7 @@ AGENTS: Dict[str, AgentConfig] = {
         id="fact_finder",
         name="The Fact-Finder",
         label="🔎 Исследователь",
-        model=MODELS["deepseek_flash"],
+        model=MODELS["deepseek_pro"],
         temperature=0.1,       # Максимальная точность
         max_tokens=6000,
         description="Хранитель истины. Семантический поиск фактов, законов, цитат.",
@@ -139,7 +174,7 @@ AGENTS: Dict[str, AgentConfig] = {
         id="scout",
         name="The Scout",
         label="📡 Разведчик",
-        model=MODELS["deepseek_flash"],
+        model=MODELS["deepseek_pro"],
         temperature=0.4,       # Немного креатива для «угла подачи»
         max_tokens=3000,
         description="Разведчик повестки. Тренды, SERP, newsjacking, конкуренты.",
@@ -186,7 +221,7 @@ AGENTS: Dict[str, AgentConfig] = {
         name="The Heart",
         label="✍️ Писатель",
         model=MODELS["deepseek_pro"],
-        temperature=0.65,       # Стабильный ритм, достаточная вариативность
+        temperature=0.3,       # Строгий ритм, точное следование объему и лаконичность
         max_tokens=16000,       # Длинные статьи (30k символов = ~16k токенов)
         description="Мастер слога. Текст, стиль, голос эксперта, ритм.",
         input_from=["engineer"],
@@ -234,7 +269,7 @@ AGENTS: Dict[str, AgentConfig] = {
         id="mirror",
         name="The Mirror",
         label="🪞 Зеркало",
-        model=MODELS["deepseek_flash"],
+        model=MODELS["deepseek_pro"],
         temperature=0.1,        # Строгий алгоритм
         max_tokens=4000,
         description="Anti-AI контроль. Perplexity, burstiness, humanization.",
@@ -251,7 +286,7 @@ AGENTS: Dict[str, AgentConfig] = {
         id="booster",
         name="The Booster",
         label="🚀 SEO/GEO",
-        model=MODELS["deepseek_flash"],
+        model=MODELS["deepseek_pro"],
         temperature=0.3,
         max_tokens=8000,
         description="Хакер алгоритмов. Schema.org, E-E-A-T, Citation Bait, GEO.",
@@ -275,7 +310,7 @@ AGENTS: Dict[str, AgentConfig] = {
         id="artist",
         name="The Artist",
         label="🎨 Визуализатор",
-        model=MODELS["deepseek_flash"],
+        model=MODELS["deepseek_pro"],
         temperature=0.5,
         max_tokens=3000,
         description="Арт-директор. Промпты для GPT Image 2.0, брендбук, инфографика.",
@@ -289,6 +324,22 @@ AGENTS: Dict[str, AgentConfig] = {
                 "text", "source_type", "image_style",
             ],
         ),
+    ),
+
+    # ───────────────────────────────────────────────
+    # 10. Внешний Ревизор (The External Reviewer)
+    # ───────────────────────────────────────────────
+    "external_reviewer": AgentConfig(
+        id="external_reviewer",
+        name="The External Reviewer",
+        label="🕵️ Ревизор",
+        model=MODELS["external_reviewer"],
+        temperature=0.1,
+        max_tokens=4000,
+        description="Внешний аудит качества и логики на базе Gemini 3 Pro.",
+        input_from=["heart"],
+        output_to=["heart"],
+        rag=RagConfig(enabled=False),
     ),
 }
 

@@ -55,6 +55,47 @@ def slugify(text: str, max_len: int = 40) -> str:
     return slug[:max_len]
 
 
+def _normalize_article_markdown(text: str) -> str:
+    """Восстановить блочную структуру Markdown перед конвертацией в HTML.
+
+    Агенты-редакторы нередко возвращают текст, где пустые строки между блоками
+    схлопнуты в один перевод строки (а то и вовсе склеены). Без пустых строк
+    парсер Markdown не распознаёт заголовки/списки и выдаёт «сплошной текст».
+    Здесь мы гарантируем пустую строку до и после каждого заголовка и перед
+    началом списка, а также схлопываем лишние переводы строк.
+    """
+    if not text:
+        return ""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+
+    def _is_heading(line: str) -> bool:
+        return bool(re.match(r'^\s{0,3}#{1,6}\s', line))
+
+    def _is_list(line: str) -> bool:
+        return bool(re.match(r'^\s*(?:[-*+]|\d+[.)])\s', line))
+
+    def _is_blank(line: str) -> bool:
+        return line.strip() == ""
+
+    out: list = []
+    for line in text.split("\n"):
+        if _is_heading(line):
+            if out and not _is_blank(out[-1]):
+                out.append("")
+            out.append(line.strip())
+            out.append("")
+        elif _is_list(line):
+            if out and not _is_blank(out[-1]) and not _is_list(out[-1]):
+                out.append("")
+            out.append(line)
+        else:
+            out.append(line)
+
+    normalized = "\n".join(out)
+    normalized = re.sub(r'\n{3,}', '\n\n', normalized)
+    return normalized.strip()
+
+
 def save_html_preview(state, output_dir: Path):
     """Сгенерировать красивый, адаптивный HTML-просмотрщик статьи (дизайн 'НЕЙРОЦЕХ / Журнальный разворот')."""
     article_content = state.final_article or state.draft or ""
@@ -64,13 +105,28 @@ def save_html_preview(state, output_dir: Path):
     # Нормализуем переводы строк для совместимости Windows/Linux и надежной работы парсера
     article_content = article_content.replace("\r\n", "\n")
 
+    # 1. Очистка от вводных преамбул LLM (например, "Вот статья...", "Конечно, я переписал...")
+    # Удаляем любой текст до первого заголовка # или ##, если он похож на преамбулу
+    first_header_pos = article_content.find('#')
+    if first_header_pos > 0:
+        preamble = article_content[:first_header_pos].strip()
+        # Если преамбула не содержит разметки и похожа на разговорный текст, отрезаем её
+        if len(preamble) < 500 and not any(m in preamble for m in ["##", "###", "!["]):
+            logger.info(f"   🧹 save_html_preview: Удалена преамбула ИИ: '{preamble[:60]}...'")
+            article_content = article_content[first_header_pos:]
+
+    # 2. Очистка от неразрешенных текстовых маркеров картинок вида [картинка: ...] или [IMAGE_PROMPT_HERE]
+    marker_pattern = r"\[(?:картинка|IMAGE_PROMPT_HERE)(?::\s*.*?)?\]"
+    article_content = re.sub(marker_pattern, "", article_content)
+
+    # 3. Восстанавливаем блочную структуру Markdown (заголовки/списки)
+    article_content = _normalize_article_markdown(article_content)
+
     # Определение человеческого типа статьи
     type_names = {
         "seo": "СЕО-статья",
         "longread": "Лонгрид",
     }
-    # Если выбран конкретный стиль-пресет — показываем его человеческое имя,
-    # иначе человеческое имя размерного типа (seo/longread).
     style_names = {
         "checklist": "Чек-лист «10 пунктов»",
         "analysis": "Аналитический лонгрид",
@@ -81,6 +137,7 @@ def save_html_preview(state, output_dir: Path):
     }
     type_name = style_names.get(getattr(state, "style_id", ""), type_names.get(state.article_type, "Статья"))
     direction = state.direction or "Бизнес"
+    
     # Встроенный парсер метаданных для полной независимости от pipeline.py
     def _extract_meta_from_text(text: str) -> dict:
         meta_dict = {}
@@ -106,11 +163,9 @@ def save_html_preview(state, output_dir: Path):
     # Если метаданных не хватает в final_meta, пробуем спасти их с помощью regex из сырого ответа Booster или текста статьи
     if not meta_title or not meta_description or not keywords_list:
         logger.info("   🔍 HTML Preview: Запуск регулярного парсера для извлечения метаданных...")
-        # Пытаемся спасти сначала из сырого ответа Booster, так как при поломке JSON данные там
         raw_booster = state.seo_package.get("raw_response", "") if state.seo_package else ""
         extracted = _extract_meta_from_text(raw_booster) if raw_booster else {}
         
-        # Если там нет, то ищем в самой статье
         extracted_article = _extract_meta_from_text(article_content)
         for k, v in extracted_article.items():
             if v and not extracted.get(k):
@@ -129,45 +184,89 @@ def save_html_preview(state, output_dir: Path):
     if not meta_description:
         meta_description = "Статья сгенерирована мультиагентной системой Copywriter."
 
-    # Сгенерировать теги ключевых слов
-    keywords_html = "".join([f'<span class="keyword-tag">{kw}</span>' for kw in keywords_list])
-    if not keywords_html:
-        keywords_html = '<span class="keyword-tag">налоги</span><span class="keyword-tag">бизнес</span>'
-        
+    # Нормализуем формат ключевых слов
+    if isinstance(keywords_list, str):
+        keywords_list = [k.strip() for k in keywords_list.split(",") if k.strip()]
+
+    keywords_html = "".join([
+        f'<span class="keyword-tag">{kw}</span>'
+        for kw in keywords_list
+    ])
+
     # Преобразуем Markdown в HTML
     html_body = ""
     try:
         import markdown
-        # Использование официального парсера с таблицами
-        html_body = markdown.markdown(article_content, extensions=['tables', 'fenced_code', 'nl2br'])
+        # Официальный парсер. Без 'nl2br' (он превращал одиночные переводы строк
+        # в <br> и ломал структуру); 'sane_lists' — корректные списки.
+        html_body = markdown.markdown(
+            article_content,
+            extensions=['tables', 'fenced_code', 'sane_lists'],
+        )
     except ImportError:
+        logger.warning("⚠️ Библиотека 'markdown' не установлена. Используется встроенный упрощенный парсер. Для идеального рендеринга таблиц и списков рекомендуется выполнить: pip install markdown")
+        
         # Простой встроенный регулярный парсер (чтобы работало без пипа)
         html = article_content
-        
-        # Экранирование базовых тегов
         html = html.replace("<", "&lt;").replace(">", "&gt;")
         
-        # Заголовки
         html = re.sub(r'^#\s+(.*?)$', r'<h1 class="text-3xl font-bold my-6">\1</h1>', html, flags=re.MULTILINE)
         html = re.sub(r'^##\s+(.*?)$', r'<h2 class="text-2xl font-bold my-4 border-b pb-2">\1</h2>', html, flags=re.MULTILINE)
         html = re.sub(r'^###\s+(.*?)$', r'<h3 class="text-xl font-bold my-3">\1</h3>', html, flags=re.MULTILINE)
         
-        # Картинки в Markdown: ![caption](url)
         html = re.sub(r'!\[(.*?)\]\((.*?)\)', r'<img src="\2" alt="\1" />', html)
-        
-        # Жирный и курсив
         html = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', html)
         html = re.sub(r'\*(.*?)\*', r'<em>\1</em>', html)
-        
-        # Цитаты
         html = re.sub(r'^&gt;\s+(.*?)$', r'<blockquote class="border-l-4 border-primary pl-4 my-4 italic text-textMuted">\1</blockquote>', html, flags=re.MULTILINE)
         
-        # Списки
-        html = re.sub(r'^\s*-\s+(.*?)$', r'<li class="list-disc ml-4">\1</li>', html, flags=re.MULTILINE)
-        html = re.sub(r'^\s*\*\s+(.*?)$', r'<li class="list-disc ml-4">\1</li>', html, flags=re.MULTILINE)
-        html = re.sub(r'^\s*\d+\.\s+(.*?)$', r'<li class="list-decimal ml-4">\1</li>', html, flags=re.MULTILINE)
+        # Преобразуем маркированные списки в <li>
+        html = re.sub(r'^[ \t]*[-*][ \t]+(.*?)$', r'<li>\1</li>', html, flags=re.MULTILINE)
         
-        # Разделение по абзацам с нормализацией пустых строк с пробелами/табами
+        # Оборачиваем группы <li> в <ul>
+        def wrap_ul(match):
+            return '<ul>\n' + match.group(0) + '\n</ul>'
+        html = re.sub(r'(?:<li>.*?</li>\n?)+', wrap_ul, html)
+        
+        # Преобразуем нумерованные списки
+        html = re.sub(r'^[ \t]*\d+\.[ \t]+(.*?)$', r'<li-ord>\1</li-ord>', html, flags=re.MULTILINE)
+        
+        # Оборачиваем группы <li-ord> в <ol>
+        def wrap_ol(match):
+            items = match.group(0).replace('<li-ord>', '<li>').replace('</li-ord>', '</li>')
+            return '<ol>\n' + items + '\n</ol>'
+        html = re.sub(r'(?:<li-ord>.*?</li-ord>\n?)+', wrap_ol, html)
+        
+        # Парсинг таблиц Markdown
+        def parse_tables(text_content):
+            lines = text_content.split('\n')
+            output_lines = []
+            in_table = False
+            table_html = []
+            for line in lines:
+                if line.strip().startswith('|') and line.strip().endswith('|'):
+                    cells = [c.strip() for c in line.split('|')[1:-1]]
+                    if not in_table:
+                        in_table = True
+                        table_html.append('<table>')
+                        table_html.append('<thead><tr>' + ''.join(f'<th>{c}</th>' for c in cells) + '</tr></thead>')
+                        table_html.append('<tbody>')
+                    else:
+                        if all(re.match(r'^[-:\s]+$', c) for c in cells):
+                            continue
+                        table_html.append('<tr>' + ''.join(f'<td>{c}</td>' for c in cells) + '</tr>')
+                else:
+                    if in_table:
+                        in_table = False
+                        table_html.append('</tbody></table>')
+                        output_lines.append('\n'.join(table_html))
+                        table_html = []
+                    output_lines.append(line)
+            if in_table:
+                table_html.append('</tbody></table>')
+                output_lines.append('\n'.join(table_html))
+            return '\n'.join(output_lines)
+            
+        html = parse_tables(html)
         html = re.sub(r'\n\s*\n', '\n\n', html)
         paragraphs = html.split('\n\n')
         for i, p in enumerate(paragraphs):
@@ -178,7 +277,6 @@ def save_html_preview(state, output_dir: Path):
                 paragraphs[i] = f'<p class="mb-4 text-justify leading-relaxed">{p_strip}</p>'
         html_body = "\n\n".join(paragraphs)
         
-    # Назначаем классы изображениям для красивой стилизации (Обложка сверху, тонкие разделители в тексте)
     html_body = re.sub(
         r'<img([^>]*?)alt="Обложка"([^>]*?)>',
         r'<img\1alt="Обложка" class="cover-image"\2>',
@@ -192,59 +290,81 @@ def save_html_preview(state, output_dir: Path):
         flags=re.IGNORECASE
     )
 
-    # Кастомная подсветка блоков ВАЖНО и Ошибка с премиальными классами и эмодзи
+    # Кастомная подсветка блоков Решение, Ошибка, ВАЖНО с премиальными иконками и стилями
+    # Решение:
     html_body = re.sub(
-        r'<blockquote>\s*<p>\s*<strong>Ошибка\s*—\s*</strong>(.*?)</p>\s*</blockquote>',
-        r'<div class="highlight-box error-box"><strong>❌ Ошибка — </strong>\1</div>',
+        r'<blockquote[^>]*>\s*<p>\s*<strong>Решение:</strong>(.*?)</p>\s*</blockquote>',
+        r'<div class="quote-block acceptance-block"><div class="quote-content"><div class="checklist-icon acceptance-icon"><i class="fa-solid fa-check"></i></div><div class="quote-text"><p><strong>Решение:</strong>\1</p></div></div></div>',
         html_body,
         flags=re.IGNORECASE | re.DOTALL
     )
     html_body = re.sub(
-        r'<blockquote>\s*<strong>Ошибка\s*—\s*</strong>(.*?)\s*</blockquote>',
-        r'<div class="highlight-box error-box"><strong>❌ Ошибка — </strong>\1</div>',
-        html_body,
-        flags=re.IGNORECASE | re.DOTALL
-    )
-    
-    html_body = re.sub(
-        r'<blockquote>\s*<p>\s*<strong>ВАЖНО:?</strong>(.*?)</p>\s*</blockquote>',
-        r'<div class="highlight-box warn-box"><strong>⚠️ ВАЖНО:</strong>\1</div>',
-        html_body,
-        flags=re.IGNORECASE | re.DOTALL
-    )
-    html_body = re.sub(
-        r'<blockquote>\s*<strong>ВАЖНО:?</strong>(.*?)\s*</blockquote>',
-        r'<div class="highlight-box warn-box"><strong>⚠️ ВАЖНО:</strong>\1</div>',
-        html_body,
-        flags=re.IGNORECASE | re.DOTALL
-    )
-    
-    # Кастомная подсветка блоков ПОСЛЕСЛОВИЕ / ИТОГ
-    html_body = re.sub(
-        r'<p>\s*(Послесловие|Итог):?\s*(.*?)</p>',
-        r'<div class="highlight-box important"><strong>🎯 ИТОГ:</strong> \2</div>',
+        r'<blockquote[^>]*>\s*<strong>Решение:</strong>(.*?)\s*</blockquote>',
+        r'<div class="quote-block acceptance-block"><div class="quote-content"><div class="checklist-icon acceptance-icon"><i class="fa-solid fa-check"></i></div><div class="quote-text"><p><strong>Решение:</strong>\1</p></div></div></div>',
         html_body,
         flags=re.IGNORECASE | re.DOTALL
     )
 
-    # Если в html_body нет заголовка h1, вставляем красивый заголовок первого уровня
+    # Ошибка:
+    html_body = re.sub(
+        r'<blockquote[^>]*>\s*<p>\s*<strong>Ошибка(?:\s*[-—:]\s*|\s+)(.*?)</strong>(.*?)</p>\s*</blockquote>',
+        r'<div class="quote-block danger-block"><div class="quote-content"><div class="checklist-icon danger-icon"><i class="fa-solid fa-xmark"></i></div><div class="quote-text"><p><strong>Ошибка \1 </strong>\2</p></div></div></div>',
+        html_body,
+        flags=re.IGNORECASE | re.DOTALL
+    )
+    html_body = re.sub(
+        r'<blockquote[^>]*>\s*<strong>Ошибка(?:\s*[-—:]\s*|\s+)(.*?)</strong>(.*?)\s*</blockquote>',
+        r'<div class="quote-block danger-block"><div class="quote-content"><div class="checklist-icon danger-icon"><i class="fa-solid fa-xmark"></i></div><div class="quote-text"><p><strong>Ошибка \1 </strong>\2</p></div></div></div>',
+        html_body,
+        flags=re.IGNORECASE | re.DOTALL
+    )
+
+    # ВАЖНО:
+    html_body = re.sub(
+        r'<blockquote[^>]*>\s*<p>\s*<strong>ВАЖНО:?</strong>(.*?)</p>\s*</blockquote>',
+        r'<div class="quote-block warn-block"><div class="quote-content"><div class="checklist-icon warn-icon"><i class="fa-solid fa-exclamation"></i></div><div class="quote-text"><p><strong>ВАЖНО:</strong>\1</p></div></div></div>',
+        html_body,
+        flags=re.IGNORECASE | re.DOTALL
+    )
+    html_body = re.sub(
+        r'<blockquote[^>]*>\s*<strong>ВАЖНО:?</strong>(.*?)\s*</blockquote>',
+        r'<div class="quote-block warn-block"><div class="quote-content"><div class="checklist-icon warn-icon"><i class="fa-solid fa-exclamation"></i></div><div class="quote-text"><p><strong>ВАЖНО:</strong>\1</p></div></div></div>',
+        html_body,
+        flags=re.IGNORECASE | re.DOTALL
+    )
+
     if not re.search(r'<h1[^>]*>', html_body, re.IGNORECASE):
         html_body = f'<h1>{meta_title}</h1>\n\n' + html_body
 
-    # Вычисляем примерное время чтения (1500 символов в минуту)
+    subtitle = meta.get("subtitle") or meta_description or ""
+    if subtitle:
+        lead_html = f'\n<p class="lead-text">{subtitle}</p>\n'
+        html_body = re.sub(
+            r'(<h1[^>]*>.*?</h1>)',
+            rf'\1{lead_html}',
+            html_body,
+            count=1,
+            flags=re.IGNORECASE
+        )
+
     char_count = len(article_content)
     reading_time = max(1, char_count // 1500)
+    char_count_formatted = f"{char_count:,}".replace(",", " ") + " симв."
+    reading_time_formatted = f"~{reading_time} мин."
     
-    # HTML Шаблон
+    # HTML Шаблон (Премиум B2B стиль с сайдбаром)
     html_template = """<!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="{meta_description}">
+    <meta name="keywords" content="{keywords_list_meta}">
     <title>{meta_title}</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;600;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
     <style>
-        :root {{
+        :root {
             --bg-color: #f8fafc;
             --surface-color: #ffffff;
             --text-main: #0f172a;
@@ -255,30 +375,148 @@ def save_html_preview(state, output_dir: Path):
             --border: #e2e8f0;
             --shadow: 0 4px 6px -1px rgb(0 0 0 / 0.05), 0 2px 4px -2px rgb(0 0 0 / 0.05);
             --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.05), 0 4px 6px -4px rgb(0 0 0 / 0.05);
-        }}
+        }
 
-        body {{
+        .highlight-box {
+            padding: 20px 24px;
+            border-radius: 8px;
+            margin: 28px 0;
+            font-size: 1.05rem;
+            line-height: 1.6;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.02);
+            transition: all 0.2s ease;
+        }
+
+        .highlight-box:hover {
+            transform: translateX(2px);
+        }
+
+        .highlight-box.error-box {
+            border-left: 5px solid #dc2626;
+            background-color: #fff5f5;
+            color: #7f1d1d;
+            font-style: italic;
+        }
+
+        .highlight-box.error-box strong {
+            font-weight: 700;
+            color: #b91c1c;
+            font-style: normal;
+            margin-right: 4px;
+        }
+
+        .highlight-box.warn-box, .highlight-box.important {
+            border-left: 5px solid #d97706;
+            background-color: #fffbeb;
+            color: #78350f;
+            font-style: italic;
+        }
+
+        .highlight-box.warn-box strong, .highlight-box.important strong {
+            font-weight: 700;
+            color: #b45309;
+            font-style: normal;
+            margin-right: 4px;
+        }
+
+        .quote-block {
+            margin: 24px 0;
+            padding: 20px 24px;
+            border-radius: 12px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.03);
+            border: 1px solid transparent;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+
+        .quote-block:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.06);
+        }
+
+        .quote-content {
+            display: flex;
+            align-items: flex-start;
+            gap: 16px;
+        }
+
+        .checklist-icon {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            font-size: 1.1rem;
+            flex-shrink: 0;
+            margin-top: 2px;
+        }
+
+        .quote-text {
+            font-size: 1rem;
+            line-height: 1.6;
+            color: var(--text-main);
+        }
+
+        .quote-text p {
+            margin: 0;
+            text-align: left;
+        }
+
+        .acceptance-block {
+            background-color: #f0fdf4;
+            border-color: #bbf7d0;
+        }
+        
+        .acceptance-icon {
+            background-color: #dcfce7;
+            color: #16a34a;
+            border: 1px solid #bbf7d0;
+        }
+
+        .danger-block {
+            background-color: #fef2f2;
+            border-color: #fecaca;
+        }
+
+        .danger-icon {
+            background-color: #fee2e2;
+            color: #dc2626;
+            border: 1px solid #fecaca;
+        }
+
+        .warn-block {
+            background-color: #fffbeb;
+            border-color: #fef3c7;
+        }
+
+        .warn-icon {
+            background-color: #fef3c7;
+            color: #d97706;
+            border: 1px solid #fde68a;
+        }
+
+        body {
             background-color: var(--bg-color);
             color: var(--text-main);
             font-family: 'Inter', sans-serif;
             margin: 0;
             padding: 0;
             line-height: 1.7;
-        }}
+        }
 
-        .container {{
+        .container {
             max-width: 1400px;
             margin: 0 auto;
             padding: 40px 20px;
             box-sizing: border-box;
-        }}
+        }
 
-        header {{
+        header {
             margin-bottom: 24px;
             text-align: left;
-        }}
+        }
 
-        .badge {{
+        .badge {
             display: inline-block;
             padding: 6px 16px;
             background-color: var(--primary-light);
@@ -290,49 +528,49 @@ def save_html_preview(state, output_dir: Path):
             border-radius: 9999px;
             margin-bottom: 16px;
             border: 1px solid rgba(16, 185, 129, 0.15);
-        }}
+        }
 
-        .layout {{
+        .layout {
             display: grid;
             grid-template-columns: 1fr 380px;
             gap: 40px;
-        }}
+        }
 
-        @media (max-width: 1024px) {{
-            .layout {{
+        @media (max-width: 1024px) {
+            .layout {
                 grid-template-columns: 1fr;
-            }}
-        }}
+            }
+        }
 
-        .article-card {{
+        .article-card {
             background-color: var(--surface-color);
             border: 1px solid var(--border);
             border-radius: 16px;
             padding: 50px;
             box-shadow: var(--shadow-lg);
-        }}
+        }
 
-        .sidebar {{
+        .sidebar {
             display: flex;
             flex-direction: column;
             gap: 24px;
-        }}
+        }
 
-        .sticky-sidebar {{
+        .sticky-sidebar {
             position: sticky;
             top: 40px;
-        }}
+        }
 
-        .card {{
+        .card {
             background-color: var(--surface-color);
             border: 1px solid var(--border);
             border-radius: 16px;
             padding: 24px;
             box-shadow: var(--shadow);
             margin-bottom: 24px;
-        }}
+        }
 
-        .card-title {{
+        .card-title {
             font-family: 'Outfit', sans-serif;
             font-size: 0.875rem;
             font-weight: 700;
@@ -343,58 +581,65 @@ def save_html_preview(state, output_dir: Path):
             margin-bottom: 16px;
             border-bottom: 1px solid var(--border);
             padding-bottom: 10px;
-        }}
+        }
 
-        /* Typography */
-        h1, h2, h3, h4 {{
+        h1, h2, h3, h4 {
             font-family: 'Outfit', sans-serif;
             color: var(--text-main);
             font-weight: 700;
-        }}
+        }
 
-        h1 {{
+        h1 {
             font-size: 2.5rem;
             line-height: 1.25;
             margin-top: 0;
             margin-bottom: 24px;
-        }}
+        }
 
-        h2 {{
+        .lead-text {
+            font-size: 1.25rem;
+            line-height: 1.6;
+            color: var(--text-muted);
+            margin-bottom: 32px;
+            font-weight: 400;
+            border-left: 3px solid var(--primary);
+            padding-left: 16px;
+        }
+
+        h2 {
             font-size: 1.65rem;
             margin-top: 40px;
             margin-bottom: 20px;
             border-bottom: 1px solid var(--border);
             padding-bottom: 8px;
-        }}
+        }
 
-        h3 {{
+        h3 {
             font-size: 1.25rem;
             margin-top: 32px;
             margin-bottom: 16px;
-        }}
+        }
 
-        p {{
+        p {
             margin-top: 0;
             margin-bottom: 20px;
             font-size: 1.05rem;
             color: var(--text-main);
             text-align: justify;
-        }}
+        }
 
-        /* Lists */
-        ul, ol {{
+        ul, ol {
             margin-top: 0;
             margin-bottom: 24px;
             padding-left: 24px;
-        }}
+        }
 
-        li {{
+        li {
             margin-bottom: 10px;
             font-size: 1.05rem;
-        }}
+        }
 
-        /* Tables */
-        table {{
+        table {
             width: 100%;
             border-collapse: collapse;
             margin: 32px 0;
@@ -403,35 +648,34 @@ def save_html_preview(state, output_dir: Path):
             overflow: hidden;
             box-shadow: var(--shadow);
             border: 1px solid var(--border);
-        }}
+        }
 
-        th, td {{
+        th, td {
             padding: 14px 20px;
             text-align: left;
-        }}
+        }
 
-        th {{
+        th {
             background-color: #f1f5f9;
             color: var(--text-main);
             font-weight: 600;
             border-bottom: 2px solid var(--border);
-        }}
+        }
 
-        td {{
+        td {
             border-bottom: 1px solid var(--border);
             background-color: var(--surface-color);
-        }}
+        }
 
-        tr:last-child td {{
+        tr:last-child td {
             border-bottom: none;
-        }}
+        }
 
-        tr:hover td {{
+        tr:hover td {
             background-color: #f8fafc;
-        }}
+        }
 
-        /* Custom highlights */
-        blockquote {{
+        blockquote {
             border-left: 4px solid var(--primary);
             padding: 16px 24px;
             margin: 32px 0;
@@ -439,9 +683,9 @@ def save_html_preview(state, output_dir: Path):
             border-radius: 0 12px 12px 0;
             font-style: italic;
             color: var(--text-muted);
-        }}
+        }
 
-        .highlight-box {{
+        .highlight-box {
             padding: 20px 24px;
             border-radius: 8px;
             margin: 28px 0;
@@ -449,63 +693,63 @@ def save_html_preview(state, output_dir: Path):
             line-height: 1.6;
             box-shadow: 0 2px 8px rgba(0, 0, 0, 0.02);
             transition: all 0.2s ease;
-        }}
+        }
 
-        .highlight-box:hover {{
+        .highlight-box:hover {
             transform: translateX(2px);
-        }}
+        }
 
-        .highlight-box.error-box {{
+        .highlight-box.error-box {
             border-left: 5px solid #dc2626;
             background-color: #fff5f5;
             color: #7f1d1d;
             font-style: italic;
-        }}
+        }
 
-        .highlight-box.error-box strong {{
+        .highlight-box.error-box strong {
             font-weight: 700;
             color: #b91c1c;
             font-style: normal;
             margin-right: 4px;
-        }}
+        }
 
-        .highlight-box.warn-box, .highlight-box.important {{
+        .highlight-box.warn-box, .highlight-box.important {
             border-left: 5px solid #d97706;
             background-color: #fffbeb;
             color: #78350f;
             font-style: italic;
-        }}
+        }
 
-        .highlight-box.warn-box strong, .highlight-box.important strong {{
+        .highlight-box.warn-box strong, .highlight-box.important strong {
             font-weight: 700;
             color: #b45309;
             font-style: normal;
             margin-right: 4px;
-        }}
+        }
 
-        .meta-item {{
+        .meta-item {
             display: flex;
             justify-content: space-between;
             padding: 10px 0;
             border-bottom: 1px dashed var(--border);
             font-size: 0.875rem;
-        }}
+        }
 
-        .meta-item:last-child {{
+        .meta-item:last-child {
             border-bottom: none;
-        }}
+        }
 
-        .meta-label {{
+        .meta-label {
             color: var(--text-muted);
             font-weight: 500;
-        }}
+        }
 
-        .meta-value {{
+        .meta-value {
             font-weight: 600;
             color: var(--text-main);
-        }}
+        }
 
-        .keyword-tag {{
+        .keyword-tag {
             display: inline-block;
             padding: 4px 10px;
             background-color: #f1f5f9;
@@ -516,9 +760,9 @@ def save_html_preview(state, output_dir: Path):
             margin-right: 6px;
             margin-bottom: 8px;
             border: 1px solid var(--border);
-        }}
+        }
 
-        .cover-image {{
+        .cover-image {
             width: 100%;
             height: auto;
             max-height: 480px;
@@ -527,9 +771,9 @@ def save_html_preview(state, output_dir: Path):
             margin: 0 0 40px 0;
             box-shadow: var(--shadow-lg);
             display: block;
-        }}
+        }
 
-        .section-image {{
+        .section-image {
             width: 100%;
             height: auto;
             max-height: 250px;
@@ -538,16 +782,16 @@ def save_html_preview(state, output_dir: Path):
             margin: 40px 0;
             box-shadow: var(--shadow);
             display: block;
-        }}
+        }
 
-        img {{
+        img {
             max-width: 100%;
             height: auto;
             border-radius: 12px;
             margin: 24px 0;
             box-shadow: var(--shadow);
             display: block;
-        }}
+        }
     </style>
 </head>
 <body>
@@ -575,11 +819,11 @@ def save_html_preview(state, output_dir: Path):
                         </div>
                         <div class="meta-item">
                             <span class="meta-label">Длина статьи</span>
-                            <span class="meta-value">{char_count:,} симв.</span>
+                            <span class="meta-value">{char_count_formatted}</span>
                         </div>
                         <div class="meta-item">
                             <span class="meta-label">Время чтения</span>
-                            <span class="meta-value">~{reading_time} мин.</span>
+                            <span class="meta-value">{reading_time_formatted}</span>
                         </div>
                         <div class="meta-item">
                             <span class="meta-label">Создано нейросетью</span>
@@ -611,17 +855,18 @@ def save_html_preview(state, output_dir: Path):
 </body>
 </html>"""
 
-    html_content = html_template.format(
-        meta_title=meta_title,
-        direction=direction,
-        type_name=type_name,
-        html_body=html_body,
-        char_count=char_count,
-        reading_time=reading_time,
-        date=datetime.now().strftime("%Y-%m-%d %H:%M"),
-        meta_description=meta_description,
-        keywords_html=keywords_html
-    )
+    # Безопасная замена вместо .format(), чтобы избежать KeyError на CSS стилях
+    direction_val = direction or "Бизнес"
+    html_content = html_template.replace("{meta_title}", meta_title) \
+                                 .replace("{direction}", direction_val) \
+                                 .replace("{type_name}", type_name) \
+                                 .replace("{html_body}", html_body) \
+                                 .replace("{char_count_formatted}", char_count_formatted) \
+                                 .replace("{reading_time_formatted}", reading_time_formatted) \
+                                 .replace("{date}", datetime.now().strftime("%Y-%m-%d %H:%M")) \
+                                 .replace("{meta_description}", meta_description) \
+                                 .replace("{keywords_list_meta}", ", ".join(keywords_list)) \
+                                 .replace("{keywords_html}", keywords_html)
 
     html_path = output_dir / "article.html"
     html_path.write_text(html_content, encoding="utf-8")
@@ -716,6 +961,79 @@ def save_result(state, output_dir: Path):
     except Exception as html_err:
         logger.error(f"❌ Ошибка генерации HTML-превью: {html_err}")
 
+    # 7. Паспорт статьи (passport.txt)
+    char_count = len(article_content)
+    reading_time = max(1, char_count // 1500)
+    passport_lines = [
+        "============================================================",
+        "                  ПАСПОРТ СТАТЬИ / REPORT",
+        "============================================================",
+        f"Тема: {state.topic}",
+        f"Тип статьи: {state.article_type}",
+        f"Направление (дирекция): {state.direction or 'авто'}",
+        f"Стиль (ID): {getattr(state, 'style_id', '') or 'авто'}",
+        f"Целевой объем: {getattr(state, 'custom_chars', 0)} символов",
+        f"Фактический объем: {char_count} символов",
+        f"Приблизительное время чтения: {reading_time} мин.",
+        f"Дата генерации: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "------------------------------------------------------------",
+        "МЕТРИКИ РАБОТЫ АГЕНТОВ:",
+        f"Итераций Sheriff (корректор): {state.sheriff_iterations}",
+        f"Итераций Mirror (редактор): {state.mirror_iterations}",
+        "------------------------------------------------------------",
+        "РАСХОД ТОКЕНОВ (TOKEN METRICS):",
+        f"Всего токенов: {getattr(state, 'total_tokens', 0):,}",
+        f"Промпт токены: {getattr(state, 'total_prompt_tokens', 0):,}",
+        f"Выходные токены: {getattr(state, 'total_completion_tokens', 0):,}",
+    ]
+    
+    tokens_by_agent = getattr(state, 'tokens_by_agent', {})
+    if tokens_by_agent:
+        passport_lines.append("Детализация по агентам:")
+        for aid, d in tokens_by_agent.items():
+            passport_lines.append(f"  - {aid}: {d['prompt'] + d['completion']:,} токенов ({d['calls']} вызовов)")
+            
+    passport_lines.append("============================================================")
+    passport_path = output_dir / "passport.txt"
+    try:
+        passport_path.write_text("\n".join(passport_lines), encoding="utf-8")
+        logger.info(f"📋 Паспорт статьи сохранен в: {passport_path}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка сохранения паспорта статьи: {e}")
+
+    # 8. SEO-метаданные (seo.txt)
+    meta_title = meta.get("title") or state.topic
+    meta_description = meta.get("description") or "Статья сгенерирована мультиагентной системой Copywriter."
+    keywords_list = meta.get("keywords") or []
+    if isinstance(keywords_list, str):
+        keywords_list = [k.strip() for k in keywords_list.split(",") if k.strip()]
+        
+    seo_lines = [
+        "============================================================",
+        "                SEO & OPTIMIZATION METADATA",
+        "============================================================",
+        f"META TITLE: {meta_title}",
+        "------------------------------------------------------------",
+        f"META DESCRIPTION: {meta_description}",
+        "------------------------------------------------------------",
+        "KEYWORDS (КЛЮЧЕВЫЕ СЛОВА):",
+    ]
+    for i, kw in enumerate(keywords_list, 1):
+        seo_lines.append(f"  {i}. {kw}")
+        
+    if schema:
+        seo_lines.append("------------------------------------------------------------")
+        seo_lines.append("SCHEMA.ORG JSON-LD:")
+        seo_lines.append(json.dumps(schema, ensure_ascii=False, indent=2))
+        
+    seo_lines.append("============================================================")
+    seo_path = output_dir / "seo.txt"
+    try:
+        seo_path.write_text("\n".join(seo_lines), encoding="utf-8")
+        logger.info(f"🚀 SEO-метаданные сохранены в: {seo_path}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка сохранения SEO-метаданных: {e}")
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -744,7 +1062,7 @@ def main():
         help="Направление: налоги / юридическое / бизнес / финансы / экономика",
     )
     parser.add_argument("--no-scout", action="store_true", help="Пропустить Scout (нет SearXNG)")
-    parser.add_argument("--no-images", action="store_true", help="Пропустить Artist")
+    parser.add_argument("--images", action="store_true", help="Включить генерацию картинок (Artist)")
     parser.add_argument(
         "--output", "-o",
         default="output",
@@ -787,6 +1105,12 @@ def main():
         help="Дополнительные инструкции по написанию статьи",
     )
     parser.add_argument(
+        "--keywords", "--keys",
+        dest="keywords",
+        default="",
+        help="Ключевые слова через запятую",
+    )
+    parser.add_argument(
         "--provider", "-p",
         dest="provider",
         default="deepseek",
@@ -798,6 +1122,13 @@ def main():
         dest="model",
         default="",
         help="Конкретная модель для генерации (например: deepseek-v4-pro, claude-4.7, gpt-5.5)",
+    )
+    parser.add_argument(
+        "--quality",
+        action="store_true",
+        dest="quality_mode",
+        default=None,
+        help="Включить режим супер-качества QUALITY_MODE",
     )
 
     args = parser.parse_args()
@@ -860,7 +1191,7 @@ def main():
     logger.info(f"🎨 Стиль: {args.style_id or 'авто (по типу)'}")
     logger.info(f"📏 Объём: ~{args.custom_chars} символов (авто)" if args.custom_chars else f"📏 Объём: авто")
     logger.info(f"📡 Scout: {'❌ пропущен' if args.no_scout else '✅'}")
-    logger.info(f"🎨 Artist: {'❌ пропущен' if args.no_images else '✅'}")
+    logger.info(f"🎨 Artist: {'✅' if args.images else '❌ пропущен'}")
     logger.info(f"{'='*60}\n")
 
     # Сохранение (определяем путь заранее, чтобы передать в пайплайн для картинок)
@@ -868,13 +1199,17 @@ def main():
     slug = slugify(args.topic)
     output_dir = Path(args.output) / f"{timestamp}_{slug}"
 
+    # Парсинг ключевых слов и размера для пайплайна
+    keywords_list = [k.strip() for k in args.keywords.split(",") if k.strip()] if args.keywords else None
+    size_str = "long" if args.article_type == "longread" else "short"
+
     # Запуск
     state = pipe.run(
         topic=args.topic,
         article_type=args.article_type,
         direction=args.direction,
         skip_scout=args.no_scout,
-        skip_images=args.no_images,
+        skip_images=not args.images,
         style_id=args.style_id,
         custom_chars=args.custom_chars,
         output_dir=str(output_dir),
@@ -883,6 +1218,9 @@ def main():
         description=args.description,
         style_nuances=args.style_nuances,
         additional_instructions=args.additional_instructions,
+        quality_mode=args.quality_mode,
+        keywords=keywords_list,
+        size=size_str,
     )
 
     save_result(state, output_dir)
