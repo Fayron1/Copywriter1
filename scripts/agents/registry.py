@@ -69,7 +69,7 @@ MODELS: Dict[str, str] = {
     "deepseek_pro":   os.getenv("MODEL_DEEPSEEK_PRO",   "deepseek-v4-pro"),
     "deepseek_flash": os.getenv("MODEL_DEEPSEEK_FLASH", "deepseek-v4-flash"),
     # Внешний ревизор для QUALITY_MODE
-    "external_reviewer": os.getenv("MODEL_EXTERNAL_REVIEWER", "gemini-3-pro"),
+    "external_reviewer": os.getenv("MODEL_EXTERNAL_REVIEWER", "gemini-3.1-pro-openai"),
     # OpenAI — fallback при provider="openai"
     "openai_text":    os.getenv("MODEL_OPENAI_TEXT",    "gpt-4o"),
     # KIE — fallback при provider="kie"
