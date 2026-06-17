@@ -150,7 +150,7 @@ class ArticleRouter:
         pattern = PATTERNS.get(article_type, PATTERNS["free_style"])
         style_target = pattern.get("target_chars", 8000)
         
-        # Используем лимиты из st        # 3. Расчет лимитов символов в зависимости от size и custom_chars
+        # 3. Расчет лимитов символов в зависимости от size и custom_chars
         if custom_chars > 0:
             # Если пользователь явно передал объем, используем его без привязки к лимитам стиля
             # Но защищаем от абсурдных значений (от 2000 до 35000)
@@ -159,11 +159,11 @@ class ArticleRouter:
             max_chars = int(target_chars * 1.15)
         else:
             if size == "short":
-                target = 10000
+                target_chars = 10000
                 min_chars = 8500
                 max_chars = 11500
             else: # long
-                target = 25000
+                target_chars = 25000
                 min_chars = 22000
                 max_chars = 28000
 
