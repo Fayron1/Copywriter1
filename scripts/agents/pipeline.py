@@ -1101,6 +1101,14 @@ class Pipeline:
             logger.warning(f"   ⚠️ Превышение: {actual} vs лимит {max_chars}. Сокращаю...")
             state.draft = self._heart_condense(state, state.draft, heart_target)
 
+        # Чек-листы: поднимаем нумерованные пункты-H3 до H2, иначе секционные
+        # редакторы и авто-вставка картинок (работают по ^## ) их не видят.
+        if (state.article_type == "checklist" or state.style_id == "checklist"):
+            normalized = self._normalize_checklist_headings(state.draft)
+            if normalized != state.draft:
+                logger.info("   🔧 Нумерованные пункты чек-листа приведены к H2.")
+                state.draft = normalized
+
         state.steps_completed.append("heart")
         logger.info(f"   🎯 Draft: {len(state.draft)} символов")
 
@@ -1239,11 +1247,12 @@ class Pipeline:
                 "Ты — планировщик точечных правок юридической/B2B статьи на базе Gemini 3 Pro.\n"
                 "Тебе дают статью, разбитую на пронумерованные разделы, и описание/ТЗ.\n"
                 "Определи, какие разделы нуждаются в доработке (юридическая точность, полнота, стиль).\n"
-                "⚠️ СТРОГИЕ ПРАВИЛА ХУМАНИЗАЦИИ:\n"
-                "- Тон строго экспертный, деловой, авторитетный B2B. Без панибратства, сленга.\n"
-                "- Никаких ИИ-клише и штампов (например: 'в данной статье мы рассмотрим', 'важно отметить', 'подводя итоги').\n"
-                "- КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать тире в качестве связки (типа 'подлежащее — сказуемое' или для выделения вводных слов), это сразу выдает ИИ. Вместо тире перестраивай предложения, используй глаголы (является, представляет собой, означает) или просто запятые.\n"
-                "- Избегай художественных описаний природы, погоды или эмоций. Должна быть сухая деловая конкретика (номера статей ТК/НК РФ, законы, сроки).\n\n"
+                "⚠️ ПРАВИЛА ХУМАНИЗАЦИИ (текст должен читаться как статья живого эксперта-копирайтера, а не Википедия):\n"
+                "- Тон экспертный и деловой, но с авторским голосом: допустимы личное мнение ('на практике я бы…'), наблюдения из опыта, умеренные разговорные интонации и профессиональный сленг там, где он уместен. Без сухой обезличенности.\n"
+                "- Никаких ИИ-клише и канцелярита: 'в данной статье мы рассмотрим', 'важно отметить', 'подводя итоги', 'таким образом', 'закладывает фундамент', 'выстроенный конвейер', 'трансформация хаоса', 'позволяет оптимизировать', 'в современном мире'.\n"
+                "- Начинай мысль с конкретной боли/ситуации читателя, а не с абстрактного макро-контекста. Где уместно, добавляй живой микро-пример и авторский вывод.\n"
+                "- Тире разрешено как нормальная русская пунктуация; не вычищай его. Правь только злоупотребление (тире почти в каждом предложении или однообразный шаблон 'X — это Y').\n"
+                "- Сохраняй фактическую точность: номера статей ТК/НК РФ, законы, сроки и проверяемые цифры не искажай. Декоративные, ничем не подтверждённые цифры можно смягчать ('несколько минут' вместо 'до 15 минут').\n\n"
                 "Формат ответа СТРОГО JSON:\n"
                 "{\n"
                 "  \"approved\": false,  // true, если статья не требует доработки\n"
@@ -1326,8 +1335,12 @@ class Pipeline:
                 next_head = next_raw.strip()[:400]
                 instruction = "\n".join(f"- {t}" for t in instr_by_idx[idx] if t)
                 
-                # Добавляем требование о тире
-                instruction += "\n- КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать тире в качестве связки (типа 'подлежащее — сказуемое' или для вводных слов). Избегай тире вообще!"
+                # Хуманизация: голос живого эксперта, тире не вырезаем
+                instruction += (
+                    "\n- Пиши как живой эксперт-копирайтер: авторский голос, при уместности личное мнение и живой пример; убери канцелярит и ИИ-клише."
+                    "\n- Тире разрешено как нормальная пунктуация; не вычищай его, лишь не злоупотребляй (не чаще ~1 на 2–3 предложения, не шаблонь 'X — это Y')."
+                    "\n- Фактическую точность (статьи НК/ТК РФ, законы, сроки, проверяемые цифры) сохраняй без искажений."
+                )
                 
                 rewritten = self._rewrite_section(
                     state, sec, prev_tail, next_head, instruction,
@@ -1471,7 +1484,9 @@ class Pipeline:
         for pattern, repl in replacements.items():
             text = re.sub(r'(?i)' + re.escape(pattern), repl, text)
 
-        text = text.replace("â€”", "-").replace("—", "-")
+        # Чиним только mojibake-артефакт кодировки в правильное тире;
+        # сами тире НЕ вырезаем — живой копирайтер использует их естественно.
+        text = text.replace("â€”", "—")
         return text
 
     def _heart_sectional(self, state, style_block, rag_block, target_chars, override_model=None, override_provider=None, override_temperature=None):
@@ -1866,6 +1881,18 @@ class Pipeline:
     def _reassemble_sections(self, blocks: list) -> str:
         return "".join(b["raw"] for b in blocks)
 
+    def _normalize_checklist_headings(self, text: str) -> str:
+        """Привести нумерованные пункты чек-листа к H2.
+
+        Модель иногда оформляет пункты как `### 1. …` (H3), хотя спецификация
+        чек-листа требует H2 и прямо запрещает H3 внутри пунктов. Из-за этого
+        секционные редакторы (`_split_markdown_sections` по `^## `) и авто-вставка
+        картинок не видят разделы. Детерминированно поднимаем нумерованные
+        заголовки уровня H3+ до H2; обычные H2 и H1 не трогаем.
+        """
+        import re
+        return re.sub(r"(?m)^#{3,6}(\s+\d+[\.\)]\s)", r"##\1", text or "")
+
     def _raw_json_call(self, system_prompt: str, user_message: str, state=None,
                        max_tokens: int = 2000, temperature: float = 0.1) -> dict:
         """Вспомогательный строгий JSON-вызов (не зарегистрированный агент).
@@ -1977,7 +2004,9 @@ class Pipeline:
         return True
 
     def _rewrite_section(self, state: 'PipelineState', sec: dict,
-                         prev_tail: str, next_head: str, instruction: str) -> str:
+                         prev_tail: str, next_head: str, instruction: str,
+                         override_model=None, override_provider=None,
+                         override_temperature=None) -> str:
         """Переписать ОДИН раздел с контекстом стыков и общим планом."""
         target = int(len(sec["raw"]) * 1.15)
         bp = json.dumps(getattr(state, "blueprint", {}) or {}, ensure_ascii=False)
@@ -1997,7 +2026,12 @@ class Pipeline:
             f"- Текст должен логично продолжать предыдущий раздел и подводить к следующему.\n"
             f"- НЕ добавляй и НЕ удаляй заголовки H2; не пиши ничего вне этого раздела.\n"
         )
-        result = self._generate_clean_heart_text(msg, target_chars=target)
+        result = self._generate_clean_heart_text(
+            msg, target_chars=target, state=state,
+            override_model=override_model,
+            override_provider=override_provider,
+            override_temperature=override_temperature,
+        )
         return (result or "").strip()
 
     def _heart_patch(self, state: 'PipelineState'):
