@@ -291,7 +291,7 @@ def save_html_preview(state, output_dir: Path):
     )
 
     # Кастомная подсветка блоков Решение, Ошибка, ВАЖНО с премиальными иконками и стилями
-    # Решение:
+    # Решение / Действие:
     html_body = re.sub(
         r'<blockquote[^>]*>\s*<p>\s*<strong>Решение:</strong>(.*?)</p>\s*</blockquote>',
         r'<div class="quote-block acceptance-block"><div class="quote-content"><div class="checklist-icon acceptance-icon"><i class="fa-solid fa-check"></i></div><div class="quote-text"><p><strong>Решение:</strong>\1</p></div></div></div>',
@@ -300,6 +300,18 @@ def save_html_preview(state, output_dir: Path):
     )
     html_body = re.sub(
         r'<blockquote[^>]*>\s*<strong>Решение:</strong>(.*?)\s*</blockquote>',
+        r'<div class="quote-block acceptance-block"><div class="quote-content"><div class="checklist-icon acceptance-icon"><i class="fa-solid fa-check"></i></div><div class="quote-text"><p><strong>Решение:</strong>\1</p></div></div></div>',
+        html_body,
+        flags=re.IGNORECASE | re.DOTALL
+    )
+    html_body = re.sub(
+        r'<p[^>]*>\s*<strong>Действие:</strong>(.*?)</p>',
+        r'<div class="quote-block acceptance-block"><div class="quote-content"><div class="checklist-icon acceptance-icon"><i class="fa-solid fa-check"></i></div><div class="quote-text"><p><strong>Действие:</strong>\1</p></div></div></div>',
+        html_body,
+        flags=re.IGNORECASE | re.DOTALL
+    )
+    html_body = re.sub(
+        r'<p[^>]*>\s*<strong>Решение:</strong>(.*?)</p>',
         r'<div class="quote-block acceptance-block"><div class="quote-content"><div class="checklist-icon acceptance-icon"><i class="fa-solid fa-check"></i></div><div class="quote-text"><p><strong>Решение:</strong>\1</p></div></div></div>',
         html_body,
         flags=re.IGNORECASE | re.DOTALL
@@ -318,6 +330,18 @@ def save_html_preview(state, output_dir: Path):
         html_body,
         flags=re.IGNORECASE | re.DOTALL
     )
+    html_body = re.sub(
+        r'<p[^>]*>\s*<strong>Ошибка(?:\s*[-—:]\s*|\s+)(.*?)</strong>(.*?)</p>',
+        r'<div class="quote-block danger-block"><div class="quote-content"><div class="checklist-icon danger-icon"><i class="fa-solid fa-xmark"></i></div><div class="quote-text"><p><strong>Ошибка \1 </strong>\2</p></div></div></div>',
+        html_body,
+        flags=re.IGNORECASE | re.DOTALL
+    )
+    html_body = re.sub(
+        r'<p[^>]*>\s*Ошибка(?:\s*[-—:]\s*|\s+)(.*?)</p>',
+        r'<div class="quote-block danger-block"><div class="quote-content"><div class="checklist-icon danger-icon"><i class="fa-solid fa-xmark"></i></div><div class="quote-text"><p><strong>Ошибка:</strong> \1</p></div></div></div>',
+        html_body,
+        flags=re.IGNORECASE | re.DOTALL
+    )
 
     # ВАЖНО:
     html_body = re.sub(
@@ -328,6 +352,12 @@ def save_html_preview(state, output_dir: Path):
     )
     html_body = re.sub(
         r'<blockquote[^>]*>\s*<strong>ВАЖНО:?</strong>(.*?)\s*</blockquote>',
+        r'<div class="quote-block warn-block"><div class="quote-content"><div class="checklist-icon warn-icon"><i class="fa-solid fa-exclamation"></i></div><div class="quote-text"><p><strong>ВАЖНО:</strong>\1</p></div></div></div>',
+        html_body,
+        flags=re.IGNORECASE | re.DOTALL
+    )
+    html_body = re.sub(
+        r'<p[^>]*>\s*<strong>ВАЖНО:?</strong>(.*?)</p>',
         r'<div class="quote-block warn-block"><div class="quote-content"><div class="checklist-icon warn-icon"><i class="fa-solid fa-exclamation"></i></div><div class="quote-text"><p><strong>ВАЖНО:</strong>\1</p></div></div></div>',
         html_body,
         flags=re.IGNORECASE | re.DOTALL
@@ -361,20 +391,20 @@ def save_html_preview(state, output_dir: Path):
     <meta name="description" content="{meta_description}">
     <meta name="keywords" content="{keywords_list_meta}">
     <title>{meta_title}</title>
-    <link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Playfair+Display:ital,wght@0,600;0,700;0,800;0,900;1,600&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;600;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
     <style>
         :root {
-            --bg-color: #fdfdfc;
+            --bg-color: #f8fafc;
             --surface-color: #ffffff;
-            --text-main: #1c1917;
-            --text-muted: #57534e;
-            --primary: #78350f;
-            --primary-light: #fef3c7;
-            --accent: #b45309;
-            --border: #e7e5e4;
-            --shadow: 0 4px 20px -2px rgb(120 53 15 / 0.03);
-            --shadow-lg: 0 10px 30px -5px rgb(120 53 15 / 0.05);
+            --text-main: #0f172a;
+            --text-muted: #475569;
+            --primary: #10b981;
+            --primary-light: #ecfdf5;
+            --accent: #3b82f6;
+            --border: #e2e8f0;
+            --shadow: 0 4px 6px -1px rgb(0 0 0 / 0.05), 0 2px 4px -2px rgb(0 0 0 / 0.05);
+            --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.05), 0 4px 6px -4px rgb(0 0 0 / 0.05);
         }
 
         .highlight-box {
@@ -498,14 +528,14 @@ def save_html_preview(state, output_dir: Path):
         body {
             background-color: var(--bg-color);
             color: var(--text-main);
-            font-family: 'Lora', Georgia, serif;
+            font-family: 'Inter', sans-serif;
             margin: 0;
             padding: 0;
             line-height: 1.8;
         }
 
         .article-card > p:first-of-type::first-letter {
-            font-family: 'Playfair Display', serif;
+            font-family: 'Outfit', sans-serif;
             font-size: 3.2rem;
             font-weight: 900;
             float: left;
@@ -582,7 +612,7 @@ def save_html_preview(state, output_dir: Path):
         }
 
         .card-title {
-            font-family: 'Playfair Display', serif;
+            font-family: 'Outfit', sans-serif;
             font-size: 0.875rem;
             font-weight: 700;
             text-transform: uppercase;
@@ -595,7 +625,7 @@ def save_html_preview(state, output_dir: Path):
         }
 
         h1, h2, h3, h4 {
-            font-family: 'Playfair Display', Georgia, serif;
+            font-family: 'Outfit', sans-serif;
             color: var(--text-main);
             font-weight: 700;
         }
@@ -1240,6 +1270,8 @@ def main():
     print(f"\n{'='*60}")
     if state.status == "completed":
         print(f"✅ Статья готова: {output_dir / 'article.md'}")
+        if getattr(state, "best_of_summary", None):
+            print(f"\n📊 {state.best_of_summary}\n")
         print(f"   Sheriff итераций: {state.sheriff_iterations}")
         print(f"   Mirror итераций: {state.mirror_iterations}")
         total_tokens = getattr(state, 'total_tokens', 0)

@@ -8,9 +8,9 @@ Freshness — автоматическая проверка актуальнос
     заменяет устаревшие значения на свежие — ПОЛНОСТЬЮ АВТОМАТИЧЕСКИ, без ручного участия.
 
 Бэкенд:
-    kie.ai, модель gemini-3-pro (OpenAI-совместимый эндпоинт), с включённым
+    kie.ai, модель gemini-3.1-pro (OpenAI-совместимый эндпоинт), с включённым
     инструментом googleSearch (Grounding with Google Search). См.
-    https://docs.kie.ai/cn/market/gemini/gemini-3-pro.md
+    https://kie.ai/gemini-3-1-pro
 
     Эндпоинт:  {FRESHNESS_API_BASE}/{FRESHNESS_MODEL}/v1/chat/completions
     Авторизация: Authorization: Bearer <KIE_API_KEY>
@@ -29,7 +29,7 @@ Freshness — автоматическая проверка актуальнос
     FRESHNESS_ENABLED                — "true"/"false" (по умолчанию true)
     KIE_API_KEY                      — ключ kie.ai (один на все модели)
     FRESHNESS_API_BASE               — база API (по умолчанию https://api.kie.ai)
-    FRESHNESS_MODEL                  — модель (по умолчанию gemini-3-pro)
+    FRESHNESS_MODEL                  : модель (по умолчанию gemini-3.1-pro)
     FRESHNESS_REASONING_EFFORT       — "low"/"high" (по умолчанию low)
     FRESHNESS_CONFIDENCE_THRESHOLD   — порог уверенности 0..1 (по умолчанию 0.75)
     FRESHNESS_TIMEOUT                — таймаут запроса, сек (по умолчанию 120)
@@ -129,7 +129,7 @@ def is_enabled() -> bool:
 
 def _config() -> Dict[str, Any]:
     base = os.getenv("FRESHNESS_API_BASE", "https://api.kie.ai").rstrip("/")
-    model = os.getenv("FRESHNESS_MODEL", "gemini-3-pro").strip()
+    model = os.getenv("FRESHNESS_MODEL", "gemini-3.1-pro").strip()
     return {
         "api_key": os.getenv("KIE_API_KEY"),
         "url": f"{base}/{model}/v1/chat/completions",
@@ -164,7 +164,7 @@ def _loads_lenient(raw: str) -> Optional[Any]:
 
 def _call_kie(facts_text: str, cfg: Dict[str, Any]) -> Optional[str]:
     """
-    Один вызов kie.ai gemini-3-pro с googleSearch + structured output.
+    Один вызов kie.ai gemini-3.1-pro с googleSearch + structured output.
     Возвращает строку message.content или None при сбое (с ретраями/бэкоффом).
     """
     import httpx
@@ -189,6 +189,7 @@ def _call_kie(facts_text: str, cfg: Dict[str, Any]) -> Optional[str]:
     headers = {
         "Authorization": f"Bearer {cfg['api_key']}",
         "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     }
 
     last_err: Optional[str] = None

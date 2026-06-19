@@ -51,6 +51,7 @@ class AgentConfig:
     output_to: List[str]
     retry_on_fail: int = 2
     description: str = ""
+    top_p: Optional[float] = None
 
 
 # ============================================================
@@ -69,7 +70,7 @@ MODELS: Dict[str, str] = {
     "deepseek_pro":   os.getenv("MODEL_DEEPSEEK_PRO",   "deepseek-v4-pro"),
     "deepseek_flash": os.getenv("MODEL_DEEPSEEK_FLASH", "deepseek-v4-flash"),
     # Внешний ревизор для QUALITY_MODE
-    "external_reviewer": os.getenv("MODEL_EXTERNAL_REVIEWER", "gemini-3.1-pro-openai"),
+    "external_reviewer": os.getenv("MODEL_EXTERNAL_REVIEWER", "gemini-3.1-pro"),
     # OpenAI — fallback при provider="openai"
     "openai_text":    os.getenv("MODEL_OPENAI_TEXT",    "gpt-4o"),
     # KIE — fallback при provider="kie"
@@ -99,7 +100,7 @@ TEXT_MODELS: Dict[str, List[str]] = {
     ).split(",") if m.strip()],
     # Прочие LLM — через kie.ai (помодельный путь). Расширяется через env.
     "kie": [m.strip() for m in os.getenv(
-        "KIE_TEXT_MODELS", f"{MODELS['kie_text']},gpt-5.5",
+        "KIE_TEXT_MODELS", f"{MODELS['kie_text']},gpt-5.5,gpt-5-5-openai-resp,claude-opus-4-8,gemini-3.1-pro",
     ).split(",") if m.strip()],
     # OpenAI — оставлен на случай ручного выбора; по умолчанию НЕ используется
     # (GPT нужен только для эмбеддингов).
@@ -221,12 +222,13 @@ AGENTS: Dict[str, AgentConfig] = {
         name="The Heart",
         label="✍️ Писатель",
         model=MODELS["deepseek_pro"],
-        temperature=0.3,       # Строгий ритм, точное следование объему и лаконичность
+        temperature=0.85,      # Повышенная креативность для очеловечивания ритма и слога
         max_tokens=16000,       # Длинные статьи (30k символов = ~16k токенов)
         description="Мастер слога. Текст, стиль, голос эксперта, ритм.",
         input_from=["engineer"],
         output_to=["sheriff"],
         retry_on_fail=3,        # 3 попытки по фидбеку Sheriff
+        top_p=0.9,             # Параметр сэмплинга top_p для A B тестирования
         rag=RagConfig(
             collection="copywriter_kb",
             top_k=10,
@@ -336,7 +338,7 @@ AGENTS: Dict[str, AgentConfig] = {
         model=MODELS["external_reviewer"],
         temperature=0.1,
         max_tokens=4000,
-        description="Внешний аудит качества и логики на базе Gemini 3 Pro.",
+        description="Внешний аудит качества и логики на базе Gemini 3.1 Pro.",
         input_from=["heart"],
         output_to=["heart"],
         rag=RagConfig(enabled=False),

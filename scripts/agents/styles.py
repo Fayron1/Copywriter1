@@ -466,39 +466,50 @@ try:
         with open(config_path, "r", encoding="utf-8") as f:
             ext_config = json.load(f)
             for k, v in ext_config.get("article_types", {}).items():
-                if k in STYLES:
-                    # Числовые лимиты
-                    STYLES[k].target_chars = v.get("target_chars", STYLES[k].target_chars)
-                    STYLES[k].min_chars = v.get("min_chars", STYLES[k].min_chars)
-                    STYLES[k].max_chars = v.get("max_chars", STYLES[k].max_chars)
+                if k not in STYLES:
+                    STYLES[k] = ArticleStyle(
+                        id=k,
+                        name=v.get("name", k),
+                        description=v.get("description", ""),
+                        folder_name=v.get("folder_name", k),
+                        target_chars=v.get("target_chars", 15000),
+                        min_chars=v.get("min_chars", 10000),
+                        max_chars=v.get("max_chars", 25000),
+                        structure=v.get("structure", ["intro", "h2_sections", "conclusion"]),
+                    )
+                
+                # Числовые лимиты
+                STYLES[k].target_chars = v.get("target_chars", STYLES[k].target_chars)
+                STYLES[k].min_chars = v.get("min_chars", STYLES[k].min_chars)
+                STYLES[k].max_chars = v.get("max_chars", STYLES[k].max_chars)
+                
+                # Основные параметры
+                if "name" in v:
+                    STYLES[k].name = v["name"]
+                if "description" in v:
+                    STYLES[k].description = v["description"]
+                if "has_images" in v:
+                    STYLES[k].has_images = bool(v["has_images"])
+                if "has_tables" in v:
+                    STYLES[k].has_tables = bool(v["has_tables"])
+                if "has_toc" in v:
+                    STYLES[k].has_toc = bool(v["has_toc"])
+                if "tone" in v:
+                    STYLES[k].tone = v["tone"]
+                if "pov" in v:
+                    STYLES[k].pov = v["pov"]
                     
-                    # Основные параметры
-                    if "name" in v:
-                        STYLES[k].name = v["name"]
-                    if "description" in v:
-                        STYLES[k].description = v["description"]
-                    if "has_images" in v:
-                        STYLES[k].has_images = bool(v["has_images"])
-                    if "has_tables" in v:
-                        STYLES[k].has_tables = bool(v["has_tables"])
-                    if "has_toc" in v:
-                        STYLES[k].has_toc = bool(v["has_toc"])
-                    if "tone" in v:
-                        STYLES[k].tone = v["tone"]
-                    if "pov" in v:
-                        STYLES[k].pov = v["pov"]
-                        
-                    # Динамические промпты для агентов
-                    prompts = v.get("prompts", {})
-                    if "engineer_instruction" in prompts:
-                        STYLES[k].engineer_instruction = prompts["engineer_instruction"]
-                    if "heart_instruction" in prompts:
-                        STYLES[k].heart_instruction = prompts["heart_instruction"]
-                    if "sheriff_instruction" in prompts:
-                        STYLES[k].sheriff_instruction = prompts["sheriff_instruction"]
-                    if "style_reference_prompt" in prompts:
-                        STYLES[k].style_reference_prompt = prompts["style_reference_prompt"]
-                    if "text_overlay_word" in prompts:
-                        STYLES[k].text_overlay_word = prompts["text_overlay_word"]
+                # Динамические промпты для агентов
+                prompts = v.get("prompts", {})
+                if "engineer_instruction" in prompts:
+                    STYLES[k].engineer_instruction = prompts["engineer_instruction"]
+                if "heart_instruction" in prompts:
+                    STYLES[k].heart_instruction = prompts["heart_instruction"]
+                if "sheriff_instruction" in prompts:
+                    STYLES[k].sheriff_instruction = prompts["sheriff_instruction"]
+                if "style_reference_prompt" in prompts:
+                    STYLES[k].style_reference_prompt = prompts["style_reference_prompt"]
+                if "text_overlay_word" in prompts:
+                    STYLES[k].text_overlay_word = prompts["text_overlay_word"]
 except Exception as e:
     pass

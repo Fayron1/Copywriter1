@@ -647,9 +647,9 @@ class Pipeline:
                         except (ValueError, TypeError):
                             sheriff_score = 0
 
-                    # Mirror проверяет всегда хотя бы раз
+                    # Mirror проверяет ТОЛЬКО если Sheriff не дал высокий балл
                     mirror_verdict = "pass"
-                    if i == 0 or sheriff_score < 75:
+                    if sheriff_score < 75:
                         self._step_mirror(state)
                         mirror_verdict = state.mirror_review.get("verdict", "pass")
                     else:
@@ -776,12 +776,9 @@ class Pipeline:
                 if not queries:
                     queries = [state.topic, f"{state.topic} закон", f"{state.topic} судебная практика"]
                 
-                import time
                 from .searxng import search_web
                 web_snippets = []
-                for idx_q, q in enumerate(queries[:3]):
-                    if idx_q > 0:
-                        time.sleep(1.5)  # задержка против rate limit SearXNG
+                for q in queries[:3]:
                     logger.info(f"      🔍 SearXNG запрос: {q}")
                     results = search_web(q)
                     if results:
@@ -1089,16 +1086,6 @@ class Pipeline:
         chunks = query_knowledge(state.topic, "heart", self.qdrant)
         if chunks:
             rag_block = format_rag_context(chunks, max_chars=4000)
-
-        # Дополнительно извлекаем премиальные B2B образцы стиля из базы знаний (Few shot anchors)
-        style_chunks = query_knowledge("пример премиального B2B текста", "heart", self.qdrant, extra_filters={"chunk_type": "style_anchor"})
-        if not style_chunks:
-            style_chunks = query_knowledge("B2B экспертный стиль копирайтинга примеры", "heart", self.qdrant)
-        if style_chunks:
-            anchors = []
-            for idx, c in enumerate(style_chunks[:3], 1):
-                anchors.append(f"Образец {idx}:\n{c['text']}")
-            rag_block += "\n\n=== РЕАЛЬНЫЕ ОБРАЗЦЫ ПРЕМИАЛЬНОГО B2B СТИЛЯ (ДЛЯ КОПИРОВАНИЯ ИНТОНАЦИИ) ===\n" + "\n".join(anchors)
 
         # Автоподбор модели для черновика
         suggested = self._suggest_draft_model(state.topic, state.article_type, state.description)
@@ -1433,7 +1420,7 @@ class Pipeline:
                 "⚠️ СТРОГИЕ ПРАВИЛА ХУМАНИЗАЦИИ:\n"
                 "- Тон строго экспертный, деловой, авторитетный B2B. Без панибратства, сленга.\n"
                 "- Никаких ИИ-клише и штампов (например: 'в данной статье мы рассмотрим', 'важно отметить', 'подводя итоги').\n"
-                "- Контролируй частоту использования тире: не ставь его почти в каждом предложении. Используй тире естественно, но избегай монотонности текста.\n"
+                "- КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать тире в качестве связки (типа 'подлежащее — сказуемое' или для выделения вводных слов), это сразу выдает ИИ. Вместо тире перестраивай предложения, используй глаголы (является, представляет собой, означает) или просто запятые.\n"
                 "- Избегай художественных описаний природы, погоды или эмоций. Должна быть сухая деловая конкретика (номера статей ТК/НК РФ, законы, сроки).\n\n"
                 "Формат ответа СТРОГО JSON:\n"
                 "{\n"
@@ -1518,7 +1505,7 @@ class Pipeline:
                 instruction = "\n".join(f"- {t}" for t in instr_by_idx[idx] if t)
                 
                 # Добавляем требование о тире
-                instruction += "\n- Контролируй частоту использования тире: не ставь его почти в каждом предложении. Используй тире естественно, но избегай монотонности текста."
+                instruction += "\n- КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать тире в качестве связки (типа 'подлежащее — сказуемое' или для вводных слов). Избегай тире вообще!"
                 
                 rewritten = self._rewrite_section(
                     state, sec, prev_tail, next_head, instruction,
@@ -1607,31 +1594,6 @@ class Pipeline:
         )
         return result
 
-    def _apply_stopwords_cleanup(self, text: str) -> str:
-        """Авто-очистка частых штампов на лету (0 токенов)."""
-        import re
-        replacements = {
-            "таким образом,": "в итоге,",
-            "таким образом": "в итоге",
-            "важно отметить, что": "отметим, что",
-            "важно отметить что": "отметим, что",
-            "следует отметить, что": "отметим, что",
-            "следует отметить что": "отметим, что",
-            "стоит подчеркнуть, что": "подчеркнем, что",
-            "стоит подчеркнуть что": "подчеркнем, что",
-            "необходимо учитывать, что": "учтите, что",
-            "необходимо учитывать что": "учтите, что",
-            "в современных реалиях": "сейчас",
-            "на сегодняшний день": "сейчас",
-            "подводя итоги,": "в итоге,",
-            "подводя итоги": "в итоге",
-        }
-        for pattern, repl in replacements.items():
-            text = re.sub(r'(?i)' + re.escape(pattern), repl, text)
-
-        text = text.replace("â€”", "—")
-        return text
-
     def _generate_clean_heart_text(self, user_msg: str, max_retries: int = 2, target_chars: int = 0, state: PipelineState = None, override_model=None, override_provider=None, override_temperature=None) -> str:
         """Внутренняя обертка с мягкими проверками и авто-очисткой для Писателя."""
         from .stopwords import ALL_STOP_WORDS
@@ -1672,7 +1634,28 @@ class Pipeline:
                 
             break
 
-        return self._apply_stopwords_cleanup(text)
+        # Авто-очистка частых штампов на лету (0 токенов)
+        replacements = {
+            "таким образом,": "в итоге,",
+            "таким образом": "в итоге",
+            "важно отметить, что": "отметим, что",
+            "важно отметить что": "отметим, что",
+            "следует отметить, что": "отметим, что",
+            "следует отметить что": "отметим, что",
+            "стоит подчеркнуть, что": "подчеркнем, что",
+            "стоит подчеркнуть что": "подчеркнем, что",
+            "необходимо учитывать, что": "учтите, что",
+            "необходимо учитывать что": "учтите, что",
+            "в современных реалиях": "сейчас",
+            "на сегодняшний день": "сейчас",
+            "подводя итоги,": "в итоге,",
+            "подводя итоги": "в итоге",
+        }
+        for pattern, repl in replacements.items():
+            text = re.sub(r'(?i)' + re.escape(pattern), repl, text)
+
+        text = text.replace("â€”", "-").replace("—", "-")
+        return text
 
     def _heart_sectional(self, state, style_block, rag_block, target_chars, override_model=None, override_provider=None, override_temperature=None):
         """Heart: посекционная генерация лонгрида.
@@ -2527,7 +2510,6 @@ class Pipeline:
             )
         
         state.final_article = self._clean_leaked_ai_artifacts(state.final_article)
-        state.final_article = self._apply_stopwords_cleanup(state.final_article)
         
         # Извлекаем и дополняем метаданные
         state.final_meta = state.seo_package.get("meta", {}) if state.seo_package else {}
@@ -3250,7 +3232,6 @@ class Pipeline:
         current_client = self.deepseek_client  # По умолчанию DeepSeek
         model_name = agent.model  # По умолчанию модель агента
         
-        is_external_reviewer_kie = False
         if override_provider:
             provider = override_provider.lower()
             model_name = override_model if override_model else model_name
@@ -3264,7 +3245,6 @@ class Pipeline:
             if self._kie_api_key:
                 model_name = MODELS["external_reviewer"]
                 current_client = self._get_kie_client(model_name)
-                is_external_reviewer_kie = True
             else:
                 logger.warning("   ⚠️ [QUALITY_MODE] KIE_API_KEY не задан. Деградирую external_reviewer до DeepSeek Pro.")
                 model_name = MODELS["deepseek_pro"]
@@ -3302,8 +3282,6 @@ class Pipeline:
             ],
             "temperature": override_temperature if override_temperature is not None else agent.temperature,
         }
-        if getattr(agent, "top_p", None) is not None:
-            chat_params["top_p"] = agent.top_p
         
         is_o1_o3 = any(m in model_name.lower() for m in ["o1-", "o3-"])
         if is_o1_o3:
@@ -3311,28 +3289,11 @@ class Pipeline:
         else:
             chat_params["max_tokens"] = max_tokens_for_call
 
-        try:
-            response = self._chat_completion(
-                current_client,
-                response_format=response_format,
-                **chat_params
-            )
-        except Exception as e:
-            if is_external_reviewer_kie:
-                logger.warning(f"   ⚠️ [QUALITY_MODE] Ошибка KIE API ({e}). Деградирую external_reviewer до DeepSeek Pro.")
-                current_client = self.deepseek_client
-                model_name = MODELS["deepseek_pro"]
-                chat_params["model"] = model_name
-                # Корректируем параметр токенов для DeepSeek
-                if "max_completion_tokens" in chat_params:
-                    chat_params["max_tokens"] = chat_params.pop("max_completion_tokens")
-                response = self._chat_completion(
-                    current_client,
-                    response_format=response_format,
-                    **chat_params
-                )
-            else:
-                raise
+        response = self._chat_completion(
+            current_client,
+            response_format=response_format,
+            **chat_params
+        )
         # Аккумуляция токенов
         if hasattr(response, 'usage') and response.usage:
             p_tokens = response.usage.prompt_tokens or 0
