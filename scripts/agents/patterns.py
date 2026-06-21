@@ -45,7 +45,7 @@ PATTERNS = {
     }
 }
 
-# Попытка подгрузить внешние настройки для админки
+# Load size parameters from styles_config.json dynamically to keep a single source of truth
 try:
     import json
     from pathlib import Path
@@ -55,7 +55,9 @@ try:
             ext_config = json.load(f)
             for k, v in ext_config.get("article_types", {}).items():
                 if k in PATTERNS:
-                    PATTERNS[k]["target_chars"] = v.get("target_chars", PATTERNS[k]["target_chars"])
+                    PATTERNS[k]["target_chars"] = v.get("target_chars", PATTERNS[k].get("target_chars"))
+                    PATTERNS[k]["min_chars"] = v.get("min_chars", int(PATTERNS[k]["target_chars"] * 0.85))
+                    PATTERNS[k]["max_chars"] = v.get("max_chars", int(PATTERNS[k]["target_chars"] * 1.15))
                     if "name" in v:
                         PATTERNS[k]["name"] = v["name"]
 except Exception as e:

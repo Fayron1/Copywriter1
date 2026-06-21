@@ -364,9 +364,9 @@ def humanize_article(
             continue
         rewrites += 1
 
-        # accept-best: принимаем ТОЛЬКО если стало человечнее и длина адекватна
+        # accept-best: принимаем ТОЛЬКО если стало человечнее и длина адекватна (без сильных урезаний и перегруза)
         new_m = analyze_section(idx, sec.get("heading", ""), rewritten or "")
-        len_ok = rewritten and len(rewritten) >= len(sec["raw"]) * 0.6
+        len_ok = rewritten and (len(sec["raw"]) * 0.95 <= len(rewritten) <= len(sec["raw"]) * 1.15)
         if len_ok and new_m.human_score > m.human_score:
             trailing = sec["raw"][len(sec["raw"].rstrip()):]
             new_sections[idx] = {**sec, "raw": rewritten.rstrip() + trailing}

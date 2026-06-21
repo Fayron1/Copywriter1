@@ -295,6 +295,117 @@ def _to_float(v: Any) -> float:
 
 
 # ────────────────────────────────────────────────────────────
+# Grounded web search (общий бэкенд для searxng.py fallback)
+# ────────────────────────────────────────────────────────────
+_SEARCH_SYSTEM_PROMPT = (
+    "Ты — поисковый ассистент с доступом к Google Search (grounding). "
+    "По запросу пользователя найди свежие, релевантные и достоверные источники. "
+    "Приоритет — официальные и авторитетные ресурсы. Возвращай ТОЛЬКО реально "
+    "существующие страницы с рабочими URL. Не выдумывай источники, цифры и цитаты."
+)
+
+_SEARCH_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "grounded_search",
+        "strict": False,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "results": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string"},
+                            "url": {"type": "string"},
+                            "snippet": {"type": "string"},
+                        },
+                        "required": ["title", "url", "snippet"],
+                    },
+                }
+            },
+            "required": ["results"],
+        },
+    },
+}
+
+
+def grounded_search(query: str, num_results: int = 10) -> List[Dict[str, str]]:
+    """
+    Веб-поиск через kie.ai + Google Search Grounding (тот же бэкенд, что и check_facts).
+
+    Используется searxng.py как fallback, когда SearXNG недоступен.
+    Возвращает список словарей {title, url, snippet}. При любой ошибке/отсутствии
+    KIE_API_KEY возвращает [] (ничего не ломает).
+    """
+    if not query or not str(query).strip():
+        return []
+    cfg = _config()
+    if not cfg["api_key"]:
+        logger.info("   ⏭️ [grounded_search] KIE_API_KEY не задан — fallback недоступен")
+        return []
+
+    import httpx
+
+    payload = {
+        "messages": [
+            {"role": "system", "content": [{"type": "text", "text": _SEARCH_SYSTEM_PROMPT}]},
+            {"role": "user", "content": [{"type": "text", "text": (
+                f"Запрос: {query}\nВерни до {num_results} лучших источников строго по схеме."
+            )}]},
+        ],
+        "tools": [{"type": "function", "function": {"name": "googleSearch"}}],
+        "include_thoughts": False,
+        "reasoning_effort": cfg["reasoning_effort"],
+        "response_format": _SEARCH_SCHEMA,
+    }
+    headers = {
+        "Authorization": f"Bearer {cfg['api_key']}",
+        "Content-Type": "application/json",
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
+    }
+
+    last_err: Optional[str] = None
+    for attempt in range(1, cfg["max_retries"] + 1):
+        try:
+            with httpx.Client(timeout=cfg["timeout"]) as http:
+                resp = http.post(cfg["url"], json=payload, headers=headers)
+            if resp.status_code == 200:
+                data = resp.json()
+                raw = (data.get("choices") or [{}])[0].get("message", {}).get("content")
+                parsed = _loads_lenient(raw)
+                items = parsed.get("results", []) if isinstance(parsed, dict) else []
+                out: List[Dict[str, str]] = []
+                for it in items[:num_results]:
+                    if not isinstance(it, dict):
+                        continue
+                    snippet = it.get("snippet") or it.get("content") or ""
+                    if snippet:
+                        out.append({
+                            "title": it.get("title", ""),
+                            "url": it.get("url", ""),
+                            "snippet": snippet,
+                        })
+                logger.info(f"   🔎 [grounded_search] найдено {len(out)} источников по '{query}'")
+                return out
+            last_err = f"HTTP {resp.status_code}: {resp.text[:200]}"
+            if resp.status_code not in (429, 500, 502, 503, 504):
+                logger.warning(f"⚠️ [grounded_search] невосстановимая ошибка API: {last_err}")
+                return []
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
+        if attempt < cfg["max_retries"]:
+            backoff = min(2 ** attempt, 10)
+            logger.info(f"   ↻ [grounded_search] попытка {attempt} не удалась ({last_err}); повтор через {backoff}s")
+            time.sleep(backoff)
+
+    logger.warning(f"⚠️ [grounded_search] не удалось получить ответ за {cfg['max_retries']} попыток: {last_err}")
+    return []
+
+
+# ────────────────────────────────────────────────────────────
 # Локальный самотест (без пайплайна): python freshness.py
 # ────────────────────────────────────────────────────────────
 if __name__ == "__main__":

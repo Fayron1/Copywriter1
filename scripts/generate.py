@@ -181,8 +181,19 @@ def save_html_preview(state, output_dir: Path):
     # Фолбеки при полном отсутствии
     if not meta_title:
         meta_title = state.topic
+    # #3 SEO-мета: keywords из контракта, если Booster/regex не дали ничего
+    if not keywords_list and getattr(state, "keywords", None):
+        keywords_list = list(state.keywords)
+        logger.info(f"   📝 HTML Preview: keywords взяты из контракта (state.keywords): {len(keywords_list)} шт.")
+    # description: первый содержательный абзац вместо бессмысленной заглушки
     if not meta_description:
-        meta_description = "Статья сгенерирована мультиагентной системой Copywriter."
+        for _raw in article_content.split("\n"):
+            _line = re.sub(r"[*_`#>\[\]]", "", _raw.strip()).strip()
+            if _line and not _raw.strip().startswith(("#", "!", ">", "|", "-", "*", "`")) and len(_line) >= 40:
+                meta_description = (_line[:160].rsplit(" ", 1)[0].rstrip(",.;: ") + "\u2026") if len(_line) > 160 else _line
+                break
+    if not meta_description:
+        meta_description = meta_title or state.topic
 
     # Нормализуем формат ключевых слов
     if isinstance(keywords_list, str):
@@ -1044,8 +1055,8 @@ def save_result(state, output_dir: Path):
 
     # 8. SEO-метаданные (seo.txt)
     meta_title = meta.get("title") or state.topic
-    meta_description = meta.get("description") or "Статья сгенерирована мультиагентной системой Copywriter."
-    keywords_list = meta.get("keywords") or []
+    meta_description = meta.get("description") or meta_title or state.topic
+    keywords_list = meta.get("keywords") or (list(getattr(state, "keywords", []) or []))
     if isinstance(keywords_list, str):
         keywords_list = [k.strip() for k in keywords_list.split(",") if k.strip()]
         

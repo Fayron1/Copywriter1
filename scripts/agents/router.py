@@ -236,19 +236,19 @@ class ArticleRouter:
                 "sentences": "3-4",
                 "hook_size": "1-2 абзаца",
                 "tone_style": "сбалансированный инфостиль, плавное чередование фактов",
-                "h2_count": "3-4"
+                "h2_count": "4-5"
             }
-        elif target_chars <= 10000:
+        elif target_chars <= 12000:
             return {
                 "sentences": "3-5",
                 "hook_size": "2-3 абзаца",
                 "tone_style": "развернутая журнальная проза, подробные практические детали",
-                "h2_count": "4-5"
+                "h2_count": "6-8"
             }
         else:
             return {
                 "sentences": "4-6",
                 "hook_size": "полноценный подраздел",
                 "tone_style": "глубокий аналитический стиль с причинно-следственными связями",
-                "h2_count": "5-7"
+                "h2_count": "8-10"
             }

@@ -199,7 +199,7 @@ AGENTS: Dict[str, AgentConfig] = {
         label="🏗️ Структурировщик",
         model=MODELS["deepseek_pro"],
         temperature=0.2,
-        max_tokens=5000,
+        max_tokens=8000,
         description="Архитектор логики. Каркас статьи, фреймворки, модульная структура.",
         input_from=["fact_finder", "scout", "brain"],
         output_to=["heart"],
@@ -290,7 +290,9 @@ AGENTS: Dict[str, AgentConfig] = {
         label="🚀 SEO/GEO",
         model=MODELS["deepseek_pro"],
         temperature=0.3,
-        max_tokens=8000,
+        max_tokens=16000,   # Booster отдаёт ВЕСЬ текст статьи + JSON-метаданные:
+                            # 8000 не хватало на длинные статьи → ответ обрывался по токенам.
+                            # Выровнено с heart (16000), который успешно работает на этом лимите.
         description="Хакер алгоритмов. Schema.org, E-E-A-T, Citation Bait, GEO.",
         input_from=["mirror", "scout"],
         output_to=["artist", "publisher"],
