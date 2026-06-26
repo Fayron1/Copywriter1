@@ -18,12 +18,25 @@ for env_path in [
         break
 
 # ============================================================
-# OpenAI
+# OpenAI (только эмбеддинги в KB-конвейере)
 # ============================================================
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-DISTILL_MODEL = os.getenv("DISTILL_MODEL", "gpt-5.4-mini")  # Дистилляция KB
 EMBEDDING_MODEL = "text-embedding-3-large"         # Embeddings (апгрейд с ada-002)
 EMBEDDING_DIM = 3072                               # Размерность вектора
+
+# ============================================================
+# DeepSeek (дистилляция/классификация текста в KB-конвейере)
+# Разводка: OpenAI = только embeddings, DeepSeek = только текст (LLM).
+# Ключи переиспользуются из общих env рантайма.
+# ============================================================
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
+DEEPSEEK_API_BASE = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com/v1")
+# DISTILL_MODEL: явный приоритет — env DISTILL_MODEL; иначе flash-модель рантайма.
+# Для JSON-классификации/дистилляции flash оптимальна (быстрее/дешевле, reasoning не нужен).
+DISTILL_MODEL = (
+    os.getenv("DISTILL_MODEL", "").strip()
+    or os.getenv("MODEL_DEEPSEEK_FLASH", "deepseek-chat")
+)
 
 # ============================================================
 # Qdrant

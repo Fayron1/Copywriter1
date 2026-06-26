@@ -19,7 +19,10 @@ import logging
 from typing import Dict, Any, Optional, List
 from pathlib import Path
 
-from .config import DISTILL_MODEL, API_DELAY, MAX_RETRIES, RETRY_DELAYS
+from .config import (
+    DISTILL_MODEL, API_DELAY, MAX_RETRIES, RETRY_DELAYS,
+    DEEPSEEK_API_KEY, DEEPSEEK_API_BASE,
+)
 
 logger = logging.getLogger("kb.classifier")
 
@@ -44,6 +47,24 @@ def _get_openai():
         from .config import OPENAI_API_KEY
         _openai_client = OpenAI(api_key=OPENAI_API_KEY, timeout=90.0)
     return _openai_client
+
+
+_deepseek_client = None
+
+
+def _get_deepseek():
+    """DeepSeek клиент (singleton) для дистилляции/классификации текста.
+
+    Разводка: OpenAI — только embeddings, DeepSeek — только LLM-текст.
+    DeepSeek имеет OpenAI-совместимый endpoint (base_url=api.deepseek.com/v1).
+    """
+    global _deepseek_client
+    if not _deepseek_client:
+        from openai import OpenAI
+        _deepseek_client = OpenAI(
+            api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_API_BASE, timeout=90.0)
+    return _deepseek_client
+
 
 
 # ============================================================
@@ -132,6 +153,68 @@ def classify_chunk(
 # Эвристическая классификация (без GPT)
 # ============================================================
 
+# Маппинг признаков имени файла → кодекс РФ.
+# (проверяем по подстроке имени файла в нижнем регистре)
+_CODEX_BY_FILE_HINT = [
+    (("трудовой", "trudovoy", "tk_rf", "tk-rf", "tk.", "тк рф", "тк_рф"), "ТК РФ"),
+    (("nkodeks", "налоговый", "nk_rf", "nk-rf", "нк рф", "нк_рф"), "НК РФ"),
+    (("grazhdanskij", "гражданский", "gk_rf", "gk-rf", "гк рф", "гк_рф"), "ГК РФ"),
+    (("жилищный", "zhilishchnyy", "zhk_rf", "жк рф", "жк_рф"), "ЖК РФ"),
+    (("семейный", "semejnyj", "sk_rf", "ск рф", "ск_рф"), "СК РФ"),
+    (("уголовный", "ugolovnyj", "uk_rf", "ук рф", "ук_рф"), "УК РФ"),
+    (("коап", "koap", "кодекс об административных"), "КоАП РФ"),
+]
+
+# Локальный regex извлечения номера статьи из текста чанка.
+# (без импорта factcheck, чтобы не создавать циклическую зависимость)
+_ARTICLE_NUM_RE = re.compile(
+    r"ст(?:атья|атьи|атье|атью|атьё|\.)?\s+(\d+(?:\.\d+)*)",
+    re.IGNORECASE,
+)
+# Regex номера ФЗ из имени файла: "115-ФЗ", "ФЗ-115", "38 ФЗ"
+_FZ_NUM_RE = re.compile(r"(\d+)\s*[-‑]?\s*фз|фз\s*[-‑]?\s*(\d+)", re.IGNORECASE)
+
+
+def _law_metadata(chunk: str, filename_lower: str) -> Dict[str, Any]:
+    """Детерминированная разметка law-чанка (0 токенов).
+
+    Возвращает codex, article_number, authority, source_url.
+    - codex: по имени файла (ТК РФ/НК РФ/ГК РФ/КоАП РФ/ФЗ-N).
+    - article_number: номер статьи из текста чанка (первое совпадение «Статья 152»).
+    - authority: pravo.gov.ru по умолчанию (официальный портал правовой информации).
+    - source_url: пустая строка (URL конкретной статьи проставит авто-апдейтер).
+    """
+    meta: Dict[str, Any] = {}
+
+    # 1. codex по имени файла
+    codex = ""
+    for hints, name in _CODEX_BY_FILE_HINT:
+        if any(h in filename_lower for h in hints):
+            codex = name
+            break
+    if not codex:
+        # ФЗ-N: извлекаем номер из имени файла
+        m = _FZ_NUM_RE.search(filename_lower)
+        if m:
+            num = m.group(1) or m.group(2)
+            codex = f"ФЗ-{num}"
+    meta["codex"] = codex
+
+    # 2. article_number из текста чанка (берём первое совпадение)
+    art_match = _ARTICLE_NUM_RE.search(chunk)
+    meta["article_number"] = art_match.group(1) if art_match else ""
+
+    # 3. authority: pravo.gov.ru — официальный портал правовой информации РФ.
+    #    Не выдумываем конкретику; точный орган проставит апдейтер при наличии.
+    meta["authority"] = "pravo.gov.ru"
+
+    # 4. source_url: пустая строка — URL конкретной статьи проставит будущий
+    #    авто-апдейтер; ручной PDF не содержит надёжного URL.
+    meta["source_url"] = ""
+
+    return meta
+
+
 def _heuristic_classify(chunk: str, agent_id: str, source_file: str) -> Dict[str, Any]:
     """
     Базовая классификация на основе паттернов в тексте.
@@ -146,6 +229,8 @@ def _heuristic_classify(chunk: str, agent_id: str, source_file: str) -> Dict[str
     if any(kw in filename_lower for kw in ["кодекс", "kodeks", "фз", "fz", "закон", "zakon", "коап"]):
         meta["source_type"] = "law"
         meta["source_priority"] = 1
+        # Новые поля для законов (детерминированно, 0 токенов).
+        meta.update(_law_metadata(chunk, filename_lower))
     elif any(kw in filename_lower for kw in ["гайд", "guide", "template", "manual", "handbook"]):
         meta["source_type"] = "guide"
         meta["source_priority"] = 2
@@ -381,7 +466,9 @@ def _call_openai_with_retry(
     """
     for attempt in range(MAX_RETRIES):
         try:
-            response = _get_openai().chat.completions.create(
+            # Разводка клиентов: дистилляция/классификация текста — через DeepSeek
+            # (OpenAI используется только для embeddings в loader.py).
+            response = _get_deepseek().chat.completions.create(
                 model=DISTILL_MODEL,
                 messages=[
                     {"role": "system", "content": system},

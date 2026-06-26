@@ -164,6 +164,8 @@ AGENTS: Dict[str, AgentConfig] = {
                 "text", "source_file", "source_type",
                 "source_priority", "chunk_type",
                 "effective_date", "valid_until",
+                # Law-specific fields (для точной работы с нормативными актами):
+                "codex", "article_number", "authority", "source_url",
             ],
         ),
     ),

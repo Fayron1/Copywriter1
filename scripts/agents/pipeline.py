@@ -37,6 +37,7 @@ from .prompts import get_system_prompt
 from .rag import query_knowledge, format_rag_context
 from .patterns import PATTERNS
 from .freshness import check_facts as _freshness_check
+from . import factcheck as _factcheck
 
 logger = logging.getLogger("agents.pipeline")
 
@@ -295,6 +296,12 @@ class PipelineState:
     facts: Dict = field(default_factory=dict)
     facts_original: Dict = field(default_factory=dict)  # бэкап фактов до проверки актуальности
     freshness_changes: list = field(default_factory=list)  # журнал правок актуальности
+    verified_facts: Dict = field(default_factory=dict)  # Вариант B: результаты мульти-источниковой верификации {claim_norm: {verdict, sources, needs_hedging}}
+    unsupported_claims: list = field(default_factory=list)  # Вариант A: неподтверждённые утверждения (для аудита)
+    invalid_references: list = field(default_factory=list)  # Reference Validator: проблемные отсылки к статьям закона (для аудита)
+    future_laws: list = field(default_factory=list)  # Темпоральный чек: нормы, ещё не вступившие в силу (для аудита)
+    references: list = field(default_factory=list)  # финальные источники [{title, url, note}] для блока «Источники»
+    compact_mode: bool = False  # Compact Mode: статьи до 5000 символов — упрощённая структура/SEO
     scout_data: Dict = field(default_factory=dict)
     blueprint: Dict = field(default_factory=dict)
     draft: str = ""
@@ -644,6 +651,7 @@ class Pipeline:
             seo_instructions=seo_instructions,
             density_config=density_config,
             num_checklist_items=routing_res.get("num_checklist_items", 10),
+            compact_mode=routing_res.get("compact_mode", False),
             quality_mode=quality_mode,
         )
 
@@ -664,6 +672,9 @@ class Pipeline:
             # 2.5 Freshness — авто-проверка актуальности фактов (после Fact-Finder, до написания)
             self._step_freshness(state)
 
+            # 2.6 Fact Verify — мульти-источниковая верификация (≥2 ист., только строгие темы)
+            self._step_fact_verify(state)
+
             # 3. Scout — тренды (опционально)
             if not skip_scout:
                 self._step_scout(state)
@@ -678,6 +689,15 @@ class Pipeline:
             # 5. Heart — написание черновика
             self._step_heart(state)
             self._log_draft_length("Heart (Черновик)", state.draft)
+
+            # 5.5 Claim Check — извлечение утверждений + хеджирование неподтверждённых (Вариант A)
+            self._step_claim_check(state)
+
+            # 5.6 Reference Validator — валидация отсылок к статьям закона (баг ст.185.1)
+            self._step_validate_references(state)
+
+            # 5.7 Temporal Check — будущие законы не выдавать за действующие
+            self._step_temporal_check(state)
 
             # 6. Ревью и правки — единый Surgical Edit Loop (QUALITY_MODE по умолчанию).
             # Простой режим (Sheriff + Mirror + _heart_patch) выведен из эксплуатации:
@@ -696,6 +716,9 @@ class Pipeline:
                 validation_warnings = self._validate_final(state)
                 for w in validation_warnings:
                     logger.warning(w)
+
+                # 7.5 Сборка блока «Источники» (2–5 естественных ссылок)
+                self._step_assemble_references(state)
             else:
                 logger.error(f"❌ Draft пустой ({len(state.draft or '')} символов) — пропускаем Booster")
                 state.final_article = state.draft or ""
@@ -843,7 +866,48 @@ class Pipeline:
             f"Найди и структурируй все релевантные факты."
         )
         state.facts = self._call_agent("fact_finder", user_msg, state=state)
+
+        # Постфильтр: отбрасываем факты с очень низкой надёжностью (secondary без URL).
+        # Это детерминированная защита от мусорных сниппетов до того, как они попадут в Heart.
+        self._filter_low_reliability_facts(state)
+
         state.steps_completed.append("fact_finder")
+
+    def _filter_low_reliability_facts(self, state: PipelineState):
+        """Постфильтр фактов: отбрасываем низконадёжные (reliability < 0.5, secondary без URL).
+
+        Детерминированная защита от мусорных сниппетов/UGC, которые Fact-Finder
+        мог собрать из интернета. Факты с пометкой _filtered=True не удаляются
+        полностью (для аудита), но Heart получает очищенный набор.
+        """
+        facts = state.facts
+        if not isinstance(facts, dict):
+            return
+        items = facts.get("facts")
+        if not isinstance(items, list):
+            return
+
+        filtered_count = 0
+        for f in items:
+            if not isinstance(f, dict):
+                continue
+            reliability = _factcheck._to_float(f.get("reliability", 1.0))
+            source_class = str(f.get("source_class", "")).strip().lower()
+            source_url = str(f.get("source_url", "")).strip()
+
+            # Отбрасываем: низкая надёжность + вторичный источник + без URL
+            if reliability < 0.5 and source_class == "secondary" and not source_url.startswith("http"):
+                f["_filtered"] = True
+                filtered_count += 1
+            # Также помечаем secondary без URL с middling надёжностью
+            elif reliability < 0.7 and source_class == "secondary" and not source_url.startswith("http"):
+                # Понижаем reliability и ставим риск high, но не удаляем
+                f["reliability"] = 0.4
+                f["risk"] = "high"
+                f["_demoted"] = True
+
+        if filtered_count > 0:
+            logger.info(f"   🧹 [factcheck] отфильтровано {filtered_count} низконадёжных фактов (reliability < 0.5, secondary, без URL)")
 
     def _step_freshness(self, state: PipelineState):
         """Шаг 2.5: авто-проверка актуальности фактов через kie.ai + Google Search.
@@ -863,6 +927,39 @@ class Pipeline:
             state.steps_completed.append("freshness")
         except Exception as e:
             logger.warning(f"⚠️ [freshness] шаг пропущен из-за ошибки: {e}")
+
+    def _step_fact_verify(self, state: PipelineState):
+        """Шаг 2.6: мульти-источниковая верификация ключевых фактов (≥2 источника).
+
+        Только для строгих тем (юр/налог/фин). Проверяет числовые факты (ставки,
+        лимиты, суммы, статьи законов) по нескольким независимым источникам через
+        Google Search Grounding. Факт считается verified только при ≥2 источниках
+        из ≥2 разных доменов. Все остальные помечаются needs_hedging=True.
+
+        Безопасно: при любом сбое — шаг пропускается, пайплайн не ломается.
+        """
+        if not self._is_strict_topic(state.topic, state.description):
+            logger.info("   ℹ️ [factcheck] тема не строгая — мульти-источниковая верификация пропущена.")
+            return
+        try:
+            if not state.facts or not isinstance(state.facts, dict):
+                return
+            result = _factcheck.verify_facts(state.facts)
+            if result:
+                state.verified_facts = result
+                # Помечаем факты, которые не прошли верификацию
+                for fact in (state.facts.get("facts") or []):
+                    if not isinstance(fact, dict):
+                        continue
+                    claim_norm = _factcheck._normalize_claim(str(fact.get("claim", "")))
+                    for key, info in result.items():
+                        if key in claim_norm or claim_norm in key:
+                            if info.get("needs_hedging"):
+                                fact["_factcheck_needs_hedging"] = True
+                            break
+            state.steps_completed.append("fact_verify")
+        except Exception as e:
+            logger.warning(f"⚠️ [factcheck] верификация пропущена из-за ошибки: {e}")
 
     def _step_scout(self, state: PipelineState):
         """Шаг 3: Scout — тренды и актуальность."""
@@ -928,29 +1025,38 @@ class Pipeline:
         density_prompt = ""
         simplification_prompt = ""
 
+        # Эффективный целевой объём: custom_chars (если задан) или target_chars из state.
+        # Compact Mode активен при target_chars < 5000 (см. router); в pipeline он выражается
+        # через state.compact_mode. Но simplification срабатывает и при явно заданном
+        # custom_chars < 6000 (старое поведение) — берём объединение условий.
+        eff_target = state.custom_chars if state.custom_chars > 0 else 0
+        is_small = state.compact_mode or (state.custom_chars > 0 and state.custom_chars < 6000)
+
         # Упрощение структуры для малых объемов
-        if state.custom_chars > 0 and state.custom_chars < 6000:
+        if is_small:
+            vol_label = state.custom_chars if state.custom_chars > 0 else "до 5000"
             simplification_prompt = (
-                f"\n\n⚠️ ВНИМАНИЕ (МАЛЫЙ ОБЪЕМ): Задан очень малый общий объем статьи: {state.custom_chars} символов.\n"
+                f"\n\n⚠️ ВНИМАНИЕ (МАЛЫЙ ОБЪЕМ): Задан очень малый общий объем статьи: {vol_label} символов.\n"
                 f"- Чтобы статья не получилась скомканной и логика не пострадала, спроектируй МАКСИМАЛЬНО лаконичную структуру.\n"
                 f"- Допускается строго 2-3 содержательных раздела H2 (не более).\n"
                 f"- Категорически исключи любые избыточные таблицы и кейсы (оставь только один простой пример/кейс в тексте без сложных диалогов).\n"
                 f"- Каждый раздел должен быть небольшим, но законченным."
             )
 
-        if density and state.custom_chars > 0:
+        if density and (state.custom_chars > 0 or state.compact_mode):
+            vol_for_quota = state.custom_chars if state.custom_chars > 0 else eff_target
             h2_limit = f"строго {density.get('h2_count', '3-4')}"
             if state.style_id == "checklist":
                 h2_limit = f"строго ровно {state.num_checklist_items} разделов H2"
-            elif state.custom_chars < 6000:
+            elif is_small:
                 h2_limit = "строго 2-3 раздела H2"
-            
+
             density_prompt = (
                 f"\n\n⚠️ ТРЕБОВАНИЕ К КВОТАМ СИМВОЛОВ И СТРУКТУРЕ:\n"
-                f"- Общий целевой объем статьи: {state.custom_chars} символов.\n"
+                f"- Общий целевой объем статьи: {vol_for_quota} символов.\n"
                 f"- Количество содержательных разделов H2 (не считая H1 и FAQ): {h2_limit}.\n"
                 f"- Для каждого сгенерированного подзаголовка/пункта в твоем Blueprint ОБЯЗАТЕЛЬНО укажи целевой объем символов в поле `target_chars`.\n"
-                f"- Распредели суммарно {state.custom_chars} символов между всеми разделами.\n"
+                f"- Распредели суммарно {vol_for_quota} символов между всеми разделами.\n"
                 f"- Ориентир: вводный хук-кейс должен планироваться на {density.get('hook_size', '1-2 абзаца')}.\n"
             )
 
@@ -1068,29 +1174,45 @@ class Pipeline:
             
         state.steps_completed.append("plan_critique")
 
+    def _is_strict_topic(self, topic: str, description: str = "") -> bool:
+        """True, если тема строгая (юр/налог/фин) — для неё нужна мульти-источниковая верификация.
+
+        Нормализация ё→е: в темах пишут «учёте»/«счёт», а в словаре может быть «учет».
+        Без нормализации трудовые темы вроде «Оплата сверхурочных при суммированном учёте»
+        не распознавались как строгие → Fact Verify и Reference Validator отключались.
+        """
+        # Нормализуем ё→е для устойчивости сравнения
+        topic_lower = (topic or "").lower().replace("ё", "е")
+        desc_lower = (description or "").lower().replace("ё", "е")
+        strict_keywords = [
+            "налог", "ндс", "ндфл", "уфнс", "фнс", "закон", "кодекс", "115-фз",
+            "54.1", "нк рф", "тк рф", "субсидиар", "ооо", "ип", "трудов", "спор", "суд",
+            "коап", "штраф", "проверк", "банкрот", "сделок", "договор", "контрагент",
+            "бухгалтер", "учет", "финанс", "аудит", "блокировк", "пени", "пошлин",
+            "ставка", "лимит", "порог", "мрот", "усн", "патент", "самозанят", "нпд",
+            # Трудовое право (для тем про сверхурочные, отпуска, зарплаты):
+            "сверхурочн", "переработ", "оплат", "зарплат", "рабочего времени",
+            "суммированн", "отпуск", "увольнен", "компенсаци", "надбавк",
+            "преми", "выплат", "график", "сменн", "ночных", "больничн",
+        ]
+        return any(kw in topic_lower or kw in desc_lower for kw in strict_keywords)
+
     def _suggest_draft_model(self, topic: str, article_type: str, description: str) -> dict:
         """Определяет оптимального провайдера и модель на основе темы, стиля и ТЗ."""
         topic_lower = topic.lower()
         desc_lower = (description or "").lower()
-        
-        # Список ключевых слов для юридических, налоговых и финансовых ("строгих") тем
-        strict_keywords = [
-            "налог", "ндс", "ндфл", "уфнс", "фнс", "закон", "кодекс", "115-фз", 
-            "54.1", "нк рф", "субсидиар", "ооо", "ип", "трудов", "спор", "суд", 
-            "коап", "штраф", "проверк", "банкрот", "сделок", "договор", "контрагент",
-            "бухгалтер", "учет", "финанс", "аудит", "блокировк", "пени", "пошлин"
-        ]
-        
+
+        is_strict = self._is_strict_topic(topic, description)
+
         # Список ключевых слов для мягких тем (HR, управление, мотивация)
         soft_keywords = [
             "управлен", "делегирова", "мотивац", "hr", "кадр", "сотрудник", "команд",
             "лидер", "руководител", "психолог", "атмосфер", "выгоран", "опыт", "истори",
             "карьер", "собеседован", "бизнес-журнал", "колонка", "мнение", "эксперт"
         ]
-        
-        is_strict = any(kw in topic_lower or kw in desc_lower for kw in strict_keywords)
+
         is_soft = any(kw in topic_lower or kw in desc_lower for kw in soft_keywords)
-        
+
         # Стили по умолчанию
         if article_type in ("checklist", "reference", "seo") or is_strict:
             # Для строгих тем, чек-листов и справочников - DeepSeek Pro
@@ -1252,6 +1374,315 @@ class Pipeline:
 
         state.steps_completed.append("heart")
         logger.info(f"   🎯 Draft: {len(state.draft)} символов")
+
+    def _step_claim_check(self, state: PipelineState):
+        """Шаг 5.5: извлечение утверждений из черновика + хеджирование неподтверждённых.
+
+        Вариант A (всегда включён). Три фазы:
+        1. LLM извлекает все проверяемые утверждения (цифры, ставки, законы, даты).
+        2. Программная сверка с state.facts и state.verified_facts (0 токенов).
+        3. Если есть unsupported — LLM переписывает их в осторожную (хеджированную) форму.
+        Текст заменяется точечно (original→hedged), H2-структура не трогается.
+
+        Безопасно: при любом сбое — шаг пропускается, черновик не меняется.
+        """
+        try:
+            draft = state.draft or ""
+            if not draft or len(draft) < 200:
+                return
+
+            # Фаза 1: извлечение утверждений
+            claims = _factcheck.extract_claims(draft)
+            if not claims:
+                logger.info("   ℹ️ [factcheck] Claim Extractor: проверяемых утверждений не найдено.")
+                state.steps_completed.append("claim_check")
+                return
+
+            # Фаза 2: сверка с фактами (детерминированная, 0 токенов)
+            supported, unsupported = _factcheck.match_claims_to_facts(
+                claims, state.facts, state.verified_facts
+            )
+
+            # Фаза 3: хеджирование неподтверждённых
+            if unsupported:
+                # В компактном режиме ограничиваем число хеджей, чтобы не захлебнуть короткий текст.
+                hedge_batch = unsupported[:4] if getattr(state, "compact_mode", False) else unsupported
+                logger.info(f"   🛡️ [factcheck] хеджирование {len(hedge_batch)} неподтверждённых утверждений...")
+                hedges = _factcheck.hedge_claims(hedge_batch)
+
+                if hedges:
+                    applied = 0
+                    for h in hedges:
+                        orig = h["original"]
+                        hedged = h["hedged"]
+                        # Заменяем первое вхождение точной строки (не глобально —
+                        # одна формулировка может встретиться один раз)
+                        if orig in draft:
+                            draft = draft.replace(orig, hedged, 1)
+                            applied += 1
+                        else:
+                            # Fallback: пробуем менее строгую замену (без крайних пробелов)
+                            orig_stripped = orig.strip()
+                            if orig_stripped in draft and orig_stripped != orig:
+                                draft = draft.replace(orig_stripped, hedged, 1)
+                                applied += 1
+
+                    if applied > 0:
+                        state.draft = draft
+                        logger.info(f"   ✅ [factcheck] применено {applied} хеджирований в черновике.")
+                        # Сохраняем для аудита
+                        state.unsupported_claims = [
+                            {"original": h["original"], "hedged": h["hedged"]}
+                            for h in hedges
+                        ]
+                else:
+                    logger.info("   ℹ️ [factcheck] хеджирование не дало результатов.")
+            else:
+                logger.info(f"   ✅ [factcheck] все {len(claims)} утверждений подтверждены фактами.")
+
+            state.steps_completed.append("claim_check")
+        except Exception as e:
+            logger.warning(f"⚠️ [factcheck] Claim Check пропущен из-за ошибки: {e}")
+
+    def _step_validate_references(self, state: PipelineState):
+        """Шаг 5.6: валидация отсылок к статьям закона на предмет-тематическое соответствие.
+
+        Reference Validator. Только для строгих тем (юр/налог/фин), т.к. только там
+        встречаются отсылки к статьям закона. Ловит баги вида «допдень за переработку
+        по ст. 185.1 ТК РФ», где 185.1 — это диспансеризация, а не сверхурочные.
+
+        Алгоритм:
+        1. Детерминированное извлечение всех отсылок (0 токенов).
+        2. Один grounded LLM-вызов проверяет каждую: существует ли статья и регулирует
+           ли тему контекста. Возвращаются только проблемные (wrong_topic/not_found).
+        3. Хеджирование: заменяем неверную статью на correction (если найдена) или
+           смягчаем до общей отсылки к кодексу. Точечный text.replace().
+
+        Безопасно: при любом сбое — шаг пропускается, черновик не меняется.
+        """
+        if not self._is_strict_topic(state.topic, state.description):
+            logger.info("   ℹ️ [factcheck] тема не строгая — валидация отсылок пропущена.")
+            return
+        try:
+            draft = state.draft or ""
+            if not draft or len(draft) < 200:
+                return
+
+            # Фазы 1+2: извлечение и валидация отсылок
+            problems = _factcheck.validate_law_references(draft)
+            if not problems:
+                logger.info("   ✅ [factcheck] проблемных отсылок к статьям закона не найдено.")
+                state.steps_completed.append("validate_references")
+                return
+
+            logger.info(f"   ⚠️ [factcheck] найдено {len(problems)} проблемных отсылок к статьям закона.")
+
+            # Сохраняем для аудита
+            state.invalid_references = [
+                {
+                    "citation": p.get("citation", ""),
+                    "verdict": p.get("verdict", ""),
+                    "actual_topic": p.get("actual_topic", ""),
+                    "correction": p.get("correction", ""),
+                    "confidence": p.get("confidence", 0),
+                }
+                for p in problems
+            ]
+
+            # Фаза 3: хеджирование проблемных отсылок
+            hedges = _factcheck.hedge_references(problems)
+            if hedges:
+                applied = 0
+                for h in hedges:
+                    orig = h["original"]
+                    hedged = h["hedged"]
+                    if orig in draft:
+                        draft = draft.replace(orig, hedged, 1)
+                        applied += 1
+                    else:
+                        # Fallback: пробуем без крайних пробелов
+                        orig_stripped = orig.strip()
+                        if orig_stripped in draft and orig_stripped != orig:
+                            draft = draft.replace(orig_stripped, hedged, 1)
+                            applied += 1
+
+                if applied > 0:
+                    state.draft = draft
+                    logger.info(f"   ✅ [factcheck] применено {applied} исправлений отсылок к статьям закона.")
+            else:
+                logger.info("   ℹ️ [factcheck] хеджирование отсылок не дало результатов.")
+
+            state.steps_completed.append("validate_references")
+        except Exception as e:
+            logger.warning(f"⚠️ [factcheck] Reference Validator пропущен из-за ошибки: {e}")
+
+    def _step_temporal_check(self, state: PipelineState):
+        """Шаг 5.7: темпоральный чек — будущие законы не выдавать за действующие.
+
+        Только для строгих тем. Находит в черновике правовые нормы, вступающие в силу
+        ПОЗЖЕ сегодня (ещё не действующие), и хеджирует их в будущее время:
+        «статья действует в новой редакции» → «статья вступит в силу в новой редакции
+        с <дата>; до этого применяется <текущий порядок>».
+
+        Безопасно: при любом сбое — шаг пропускается, черновик не меняется.
+        """
+        if not self._is_strict_topic(state.topic, state.description):
+            logger.info("   ℹ️ [factcheck] тема не строгая — темпоральный чек пропущен.")
+            return
+        try:
+            draft = state.draft or ""
+            if not draft or len(draft) < 200:
+                return
+
+            import datetime
+            today = datetime.datetime.now().strftime("%Y-%m-%d")
+
+            problems = _factcheck.check_future_laws(draft, today)
+            if not problems:
+                logger.info("   ✅ [factcheck] норм, ещё не вступивших в силу, не найдено.")
+                state.steps_completed.append("temporal_check")
+                return
+
+            logger.info(f"   ⚠️ [factcheck] найдено {len(problems)} будущих норм (ещё не в силе).")
+            # Сохраняем для аудита
+            state.future_laws = [
+                {
+                    "citation": p.get("citation", ""),
+                    "effective_date": p.get("effective_date", ""),
+                    "current_rule": p.get("current_rule", ""),
+                    "confidence": p.get("confidence", 0),
+                }
+                for p in problems
+            ]
+
+            hedges = _factcheck.hedge_future_laws(problems, today)
+            if hedges:
+                applied = 0
+                for h in hedges:
+                    orig = h["original"]
+                    hedged = h["hedged"]
+                    if orig in draft:
+                        draft = draft.replace(orig, hedged, 1)
+                        applied += 1
+                    else:
+                        orig_stripped = orig.strip()
+                        if orig_stripped in draft and orig_stripped != orig:
+                            draft = draft.replace(orig_stripped, hedged, 1)
+                            applied += 1
+
+                if applied > 0:
+                    state.draft = draft
+                    logger.info(f"   ✅ [factcheck] применено {applied} темпоральных хеджей (будущее время).")
+            else:
+                logger.info("   ℹ️ [factcheck] хеджирование будущих норм не дало результатов.")
+
+            state.steps_completed.append("temporal_check")
+        except Exception as e:
+            logger.warning(f"⚠️ [factcheck] темпоральный чек пропущен из-за ошибки: {e}")
+
+    def _step_assemble_references(self, state: PipelineState):
+        """Шаг 7.5: сборка блока «Источники» (2–5 естественных ссылок).
+
+        Собирает пул URL из verified_facts, facts (source_url) и scout_data,
+        ранжирует по авторитетности домена, берёт top 2–5, формирует markdown-блок
+        ## Источники в конце статьи. НЕ ГОСТ — естественный формат: markdown-ссылки
+        с кратким описанием.
+
+        Безопасно: при любом сбое — блок не добавляется.
+        """
+        try:
+            pool: Dict[str, dict] = {}  # url → {title, note, authority}
+
+            # 1. Из verified_facts (высший приоритет — прошли мульти-источниковую проверку)
+            for key, info in (state.verified_facts or {}).items():
+                if not isinstance(info, dict):
+                    continue
+                for s in (info.get("sources") or []):
+                    if not isinstance(s, dict):
+                        continue
+                    url = str(s.get("url", "")).strip()
+                    if not url.startswith("http"):
+                        continue
+                    auth = _factcheck.domain_authority(url)
+                    title = str(s.get("title", "")).strip()
+                    snippet = str(s.get("snippet", "")).strip()
+                    if url not in pool or auth > pool[url].get("authority", 0):
+                        pool[url] = {"title": title, "note": _factcheck._truncate_at_word(snippet, 120), "authority": auth}
+
+            # 2. Из facts (source_url из Fact-Finder)
+            for fact in ((state.facts or {}).get("facts") or []):
+                if not isinstance(fact, dict):
+                    continue
+                url = str(fact.get("source_url", "")).strip()
+                if not url.startswith("http"):
+                    continue
+                auth = _factcheck.domain_authority(url)
+                title = str(fact.get("source", "")).strip()  # именованное описание
+                claim = _factcheck._truncate_at_word(str(fact.get("claim", "")).strip(), 120)
+                if url not in pool or auth > pool[url].get("authority", 0):
+                    pool[url] = {"title": title, "note": claim, "authority": auth}
+
+            # 3. Из scout_data (источники из интернета)
+            for s in ((state.scout_data or {}).get("sources") or []):
+                if not isinstance(s, dict):
+                    continue
+                url = str(s.get("url", "")).strip()
+                if not url.startswith("http"):
+                    continue
+                auth = _factcheck.domain_authority(url)
+                title = str(s.get("title", "")).strip()
+                if url not in pool or auth > pool[url].get("authority", 0):
+                    pool[url] = {"title": title, "note": "", "authority": auth}
+
+            if len(pool) < 2:
+                logger.info("   ℹ️ [references] недостаточно источников для блока (<2). Пропускаем.")
+                state.steps_completed.append("references")
+                return
+
+            # Ранжирование по авторитетности, дедуп по домену (берём лучший)
+            seen_domains: Dict[str, str] = {}  # domain → url
+            for url, info in sorted(pool.items(), key=lambda x: x[1].get("authority", 0), reverse=True):
+                try:
+                    host = (url.split("//")[1].split("/")[0]).lower().lstrip("www.")
+                except (IndexError, ValueError):
+                    host = ""
+                if host and host in seen_domains:
+                    continue  # уже есть источник с этого домена — пропускаем
+                if host:
+                    seen_domains[host] = url
+
+            # Берём топ 2–5 (в компактном режиме — максимум 3)
+            max_refs = 3 if getattr(state, "compact_mode", False) else 5
+            top_urls = list(seen_domains.values())[:max_refs]
+            if len(top_urls) < 2:
+                logger.info("   ℹ️ [references] после дедупа осталось <2 уникальных доменов. Пропускаем.")
+                state.steps_completed.append("references")
+                return
+
+            # Формируем markdown-блок
+            lines = ["## Источники", ""]
+            for url in top_urls:
+                info = pool[url]
+                title = info.get("title", url)
+                note = info.get("note", "")
+                if note:
+                    lines.append(f"- [{title}]({url}) — {note}")
+                else:
+                    lines.append(f"- [{title}]({url})")
+
+            ref_block = "\n".join(lines)
+            state.final_article = state.final_article.rstrip() + "\n\n" + ref_block
+
+            # Сохраняем для seo_package и HTML
+            state.references = [
+                {"title": pool[url].get("title", ""), "url": url, "note": pool[url].get("note", "")}
+                for url in top_urls
+            ]
+
+            logger.info(f"   ✅ [references] добавлен блок «Источники» ({len(top_urls)} ссылок).")
+            state.steps_completed.append("references")
+        except Exception as e:
+            logger.warning(f"⚠️ [references] сборка источников пропущена из-за ошибки: {e}")
 
     def _evaluate_draft_score(self, state: PipelineState, draft: str) -> dict:
         """Оценка черновика внешним ревизором (Turing Score и детальный вердикт)."""
@@ -2334,6 +2765,25 @@ class Pipeline:
 
         return []
 
+    def _blueprint_outline(self, blueprint: Dict, max_chars: int = 500) -> str:
+        """Компактный outline плана — только H2-заголовки (~300-500 символов).
+
+        Используется в _rewrite_section вместо полного JSON-дампа blueprint (3000 симв.),
+        т.к. для точечной правки одного раздела нужна только структура статьи для контекста,
+        а не всё содержимое плана. Экономия: ~2500 символов × N вызовов _rewrite_section.
+        """
+        if not isinstance(blueprint, dict):
+            return ""
+        headings = self._extract_sections(blueprint)
+        if not headings:
+            return ""
+        # Нумерованный список заголовков
+        lines = [f"{i+1}. {h}" for i, h in enumerate(headings)]
+        outline = "\n".join(lines)
+        if len(outline) > max_chars:
+            outline = outline[:max_chars].rsplit("\n", 1)[0] + " …"
+        return outline
+
     def _step_heart_revision(self, state: PipelineState):
         """Heart — доработка по фидбеку Sheriff."""
         logger.info("✍️ Heart: доработка по фидбеку Sheriff...")
@@ -2614,13 +3064,14 @@ class Pipeline:
                          override_model=None, override_provider=None, override_temperature=None) -> str:
         """Переписать ОДИН раздел с контекстом стыков и общим планом."""
         target = int(len(sec["raw"]) * 1.15)
-        bp = json.dumps(getattr(state, "blueprint", {}) or {}, ensure_ascii=False)
-        if len(bp) > 3000:
-            bp = bp[:3000] + " …"
+        # Только заголовки плана — для точечной правки нужен контекст структуры, не весь план.
+        # Раньше слался полный JSON blueprint (до 3000 симв.); экономия ~2500 симв. на вызов.
+        outline = self._blueprint_outline(getattr(state, "blueprint", {}) or {})
+        bp_block = outline if outline else json.dumps(getattr(state, "blueprint", {}) or {}, ensure_ascii=False)[:1500]
         msg = (
             f"Ты редактируешь ОДИН раздел статьи, не трогая остальные.\n\n"
             f"ТЕМА СТАТЬИ: {state.topic}\n\n"
-            f"ПЛАН ВСЕЙ СТАТЬИ (для логики; НЕ переписывай его):\n{bp}\n\n"
+            f"СТРУКТУРА СТАТЬИ (для логики; НЕ переписывай её):\n{bp_block}\n\n"
             f"КОНЕЦ ПРЕДЫДУЩЕГО РАЗДЕЛА (только для плавного стыка; НЕ повторяй и НЕ переписывай):\n…{prev_tail}\n\n"
             f"НАЧАЛО СЛЕДУЮЩЕГО РАЗДЕЛА (только для стыка; НЕ переписывай):\n{next_head}…\n\n"
             f"ТЕКУЩИЙ РАЗДЕЛ (именно его нужно переписать):\n{sec['raw']}\n\n"
@@ -3098,8 +3549,8 @@ class Pipeline:
             f"НАПРАВЛЕНИЕ: {state.direction}\n\n"
             f"ЧЕРНОВИК СТАТЬИ:\n{state.draft}\n\n"
             f"- Твой БЮДЖЕТ на SEO-добавки: ровно {state.seo_budget} символов. Это всё, что ты можешь добавить.\n"
-            f"- Citation Bait: подготовь по одной наживке (40-50 слов) на каждый раздел H2.\n"
-            f"- LSI-ключи: найди предложения в тексте и подготовь замены, чтобы встроить ключевые слова.\n"
+            f"- Citation Bait: {'подготовь ОДНУ наживку (40-50 слов) на всю статью (компактный режим).' if getattr(state, 'compact_mode', False) else 'подготовь по одной наживке (40-50 слов) на каждый раздел H2.'}\n"
+            f"- LSI-ключи: найди предложения в тексте и подготовь замены, чтобы встроить ключевые слова.{' Максимум 2 замены (компактный режим).' if getattr(state, 'compact_mode', False) else ''}\n"
             f"- FAQ: добавь в JSON-поле 'faq' (для Schema.org), но НЕ вставляй блок FAQ в тело статьи.\n"
             f"- Категорически ЗАПРЕЩЕНО добавлять новые разделы H2/H3.\n\n"
             f"Верни точечные правки в формате JSON."
@@ -3910,14 +4361,25 @@ class Pipeline:
 
         # Динамический временной контекст для исключения устаревшего года (2025)
         import datetime
-        current_year = datetime.datetime.now().year
+        now = datetime.datetime.now()
+        current_year = now.year
+        today_iso = now.strftime("%Y-%m-%d")
+        today_ru = now.strftime("%d.%m.%Y")
         time_anchor = (
             f"\n\n[ВРЕМЕННОЙ КОНТЕКСТ]:\n"
-            f"Текущий год — {current_year}. Все рекомендации, правила, лимиты, налоги, риски и метаданные (SEO Title, Description, H1) "
+            f"Сегодня — {today_ru} ({today_iso}). Текущий год — {current_year}.\n"
+            f"Все рекомендации, правила, лимиты, налоги, риски и метаданные (SEO Title, Description, H1) "
             f"должны генерироваться и быть актуальными исключительно для {current_year} года.\n"
             f"Любые упоминания {current_year - 1} года и более ранних периодов допускаются только в прошедшем времени "
             f"(как исторический контекст или сравнение). Категорически запрещено указывать прошлые годы (например, {current_year - 1}) "
-            f"в качестве текущего или будущего времени в заголовках, мета-тегах и основном тексте."
+            f"в качестве текущего или будущего времени в заголовках, мета-тегах и основном тексте.\n\n"
+            f"⚠️ БУДУЩИЕ ИЗМЕНЕНИЯ ЗАКОНА (критично):\n"
+            f"- Любая правовая норма с датой вступления в силу ПОСЛЕ {today_ru} — ЕЩЁ НЕ ДЕЙСТВУЕТ.\n"
+            f"- Если закон принят/опубликован, но вступает в силу позже сегодня ({today_ru}) — это БУДУЩЕЕ изменение.\n"
+            f"- Пиши его СТРОГО в будущем времени: «вступит в силу с <дата>», «с <дата> будет действовать».\n"
+            f"- ОБЯЗАТЕЛЬНО указывай дату вступления в силу. Не описывай будущую норму как действующую практику.\n"
+            f"- Текущая (действующая) редакция — та, что вступила в силу ДО или В {today_ru}. Описывай действующий порядок как актуальный.\n"
+            f"- Не пиши «статья действует в новой редакции» или «предусмотрен алгоритм», если редакция вступает позже сегодня."
         )
         extended_system_prompt = system_prompt + time_anchor
         if agent_id == "heart" and target_chars > 0:
