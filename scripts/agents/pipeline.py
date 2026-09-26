@@ -907,7 +907,18 @@ class Pipeline:
                 f["_demoted"] = True
 
         if filtered_count > 0:
-            logger.info(f"   🧹 [factcheck] отфильтровано {filtered_count} низконадёжных фактов (reliability < 0.5, secondary, без URL)")
+            # Реально убираем отфильтрованное из набора, который пойдёт Engineer/Heart:
+            # раньше флаг _filtered никто не читал, и мусор доходил до Писателя целиком.
+            kept = [f for f in items if not (isinstance(f, dict) and f.get("_filtered"))]
+            try:
+                state.facts_filtered_audit = [
+                    f for f in items if isinstance(f, dict) and f.get("_filtered")
+                ]
+            except Exception:
+                pass
+            facts["facts"] = kept
+            logger.info(f"   🧹 [factcheck] отфильтровано {filtered_count} низконадёжных фактов "
+                        f"(reliability < 0.5, secondary, без URL); к передаче далее: {len(kept)}")
 
     def _step_freshness(self, state: PipelineState):
         """Шаг 2.5: авто-проверка актуальности фактов через kie.ai + Google Search.
@@ -947,16 +958,25 @@ class Pipeline:
             result = _factcheck.verify_facts(state.facts)
             if result:
                 state.verified_facts = result
-                # Помечаем факты, которые не прошли верификацию
+                # Помечаем факты, которые не прошли верификацию, и ПРИМЕНЯЕМ коррекции:
+                # раньше correction из мульти-источниковой проверки никто не читал.
+                corrected = 0
                 for fact in (state.facts.get("facts") or []):
                     if not isinstance(fact, dict):
                         continue
                     claim_norm = _factcheck._normalize_claim(str(fact.get("claim", "")))
                     for key, info in result.items():
-                        if key in claim_norm or claim_norm in key:
+                        if key and (key in claim_norm or claim_norm in key):
                             if info.get("needs_hedging"):
+                                correction = str(info.get("correction", "") or "").strip()
+                                if correction and correction != fact.get("claim"):
+                                    fact["claim"] = correction
+                                    fact["_factcheck_corrected"] = True
+                                    corrected += 1
                                 fact["_factcheck_needs_hedging"] = True
                             break
+                if corrected:
+                    logger.info(f"   ✅ [factcheck] применено коррекций фактов: {corrected}")
             state.steps_completed.append("fact_verify")
         except Exception as e:
             logger.warning(f"⚠️ [factcheck] верификация пропущена из-за ошибки: {e}")
@@ -1003,7 +1023,7 @@ class Pipeline:
     def _step_engineer(self, state: PipelineState):
         """Шаг 4: Engineer — структура статьи."""
         logger.info("🏗️ [4/8] Engineer: создание структуры...")
-        pattern = PATTERNS.get(state.article_type) or PATTERNS.get("seo")
+        pattern = PATTERNS.get(state.article_type) or PATTERNS.get("free_style")
         
         # Загружаем индивидуальный промпт из настроек стиля
         from .styles import get_style
@@ -1555,7 +1575,7 @@ class Pipeline:
                 for p in problems
             ]
 
-            hedges = _factcheck.hedge_future_laws(problems, today)
+            hedges = _factcheck.hedge_future_laws(problems, today, draft=draft)
             if hedges:
                 applied = 0
                 for h in hedges:
@@ -1695,9 +1715,9 @@ class Pipeline:
             f"1. Точность юридических формулировок и фактов.\n"
             f"2. Стиль изложения (строгий B2B, без «воды», без ИИ-клише и навязчивых фраз, без неуместных тире в качестве связок).\n"
             f"3. Соответствие ТЗ и полнота раскрытия темы.\n\n"
-            f"Верни ответ строго в формате JSON:\n"
+            f"Верни ответ строго в формате JSON (без комментариев):\n"
             f"{{\n"
-            f"  \"score\": 85,  // итоговая общая оценка (0-100)\n"
+            f"  \"score\": 85,\n"
             f"  \"critique\": \"краткий вердикт по качеству текста\"\n"
             f"}}"
         )
@@ -4687,6 +4707,12 @@ class Pipeline:
         intent = g("primary_intent", "intent")
         if intent:
             lines.append(f"- Единый primary_intent (одна задача для одного читателя): {intent}")
+        author = g("author_role", "author")
+        if author:
+            lines.append(
+                f"- АВТОР (лицо для профессиональных наблюдений/комментариев): {author}. "
+                f"Используй первое лицо в авторских комментариях («На моей практике как {author}…»)."
+            )
         if topic_class:
             lines.append(f"- Класс темы: {topic_class}")
         if legal_density not in (None, ""):
@@ -4727,7 +4753,7 @@ class Pipeline:
                 pass  # Стиль не найден — пробуем клиентский паспорт
 
         # 2. Правила из паттернов (patterns.py)
-        pattern = PATTERNS.get(state.article_type) or PATTERNS.get("seo")
+        pattern = PATTERNS.get(state.article_type) or PATTERNS.get("free_style")
         lines = [
             "СТИЛЕВОЙ ПАСПОРТ (обязательно соблюдать):",
             f"- {pattern['heart_style']}"

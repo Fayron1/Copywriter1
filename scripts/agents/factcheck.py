@@ -28,6 +28,20 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger("agents.factcheck")
 
+
+# Ссылки на нормы и годы: НЕ являются «значениями фактов» для детерминированной
+# сверки claims->facts (защита от ложных supported по совпавшим номерам статей).
+_CITATION_MASK_RE = re.compile(
+    r"(?:стать(?:я|и|е|й|ям|ями|ях)|ст|пункт[а-я]*|подпункт[а-я]*|пп|п|часть|ч)\.?\s*(?:№\s*)?\d+(?:\.\d+)*"
+    r"|ФЗ\s*[-№]?\s*\d+"
+    r"|\b(?:19|20)\d{2}\s*(?:г(?:ода|оду|оде|\.)?)?\b",
+    re.IGNORECASE,
+)
+
+# Минимальная уверенность для «будущая норма» из темпорального чека:
+# низкоуверенные вердикты в хеджирование не идут.
+_FUTURE_CONFIDENCE_MIN = 0.75
+
 # Переиспользуем общие хелперы из freshness
 from .freshness import _config as _freshness_config
 from .freshness import _loads_lenient
@@ -359,6 +373,11 @@ _CLAIMS_SYSTEM_PROMPT = (
     "лимиты, суммы штрафов, номера статей законов (НК РФ, ТК РФ, КоАП, ФЗ), даты вступления в силу,\n"
     "сроки, пороговые значения.\n\n"
     "НЕ включай: общие утверждения без чисел, оценки мнений, маркетинговые тезисы.\n"
+    "КРИТИЧНО: НЕ включай профессиональные наблюдения и авторские комментарии — это ОЦЕНКИ\n"
+    "эксперта («чаще всего», «обычно», «на практике», «большинство компаний», «на моей практике»,\n"
+    "«самая частая ошибка»), а не проверяемые факты. Их НЕ нужно сверять с источниками.\n"
+    "Включай ТОЛЬКО утверждения с конкретной цифрой/ставкой/статьёй закона/датой, которую можно\n"
+    "подтвердить или опровергнуть первоисточником.\n"
     "Для каждого утверждения верни:\n"
     "- text: точная формулировка из текста (цитата);\n"
     "- type: rate | limit | penalty | date | law_article | amount | threshold | other;\n"
@@ -504,8 +523,13 @@ def match_claims_to_facts(
             fc = str(f.get("claim", ""))
             if fc:
                 known_claims_norm.add(_normalize_claim(fc))
-            # Извлекаем числа из факта как известные значения
-            for m in re.findall(r"\d[\d\s]*[%]?(?:\s*₽)?", str(f.get("claim", "")) + " " + str(f.get("comment", ""))):
+            # Извлекаем числа из факта как известные значения.
+            # МАСКИРУЕМ ссылки на статьи/пункты/ФЗ и годы ДО извлечения:
+            # иначе «ст. 54.1» легализует любую «1» и «54» в тексте (ложные supported).
+            numbers_src = _CITATION_MASK_RE.sub(
+                " ", str(f.get("claim", "")) + " " + str(f.get("comment", ""))
+            )
+            for m in re.findall(r"\d[\d\s]*[%]?(?:\s*₽)?", numbers_src):
                 known_values.add(_normalize_value(m))
             # Законы
             law = str(f.get("source", "")) + " " + str(f.get("claim", ""))
@@ -526,6 +550,14 @@ def match_claims_to_facts(
 
     supported: List[Dict[str, str]] = []
     unsupported: List[Dict[str, str]] = []
+    # Эвристика-предохранитель: маркеры профессиональных наблюдений/авторских комментариев.
+    # Если утверждение содержит такие маркеры — это ОЦЕНКА эксперта, а не факт: не хеджируем,
+    # пропускаем (в supported). Защита от того, чтобы фактчекер не убил добавленные наблюдения.
+    OBSERVATION_MARKERS = (
+        "чаще всего", "как правило", "на практике", "обычно", "по практике",
+        "большинство", "значительная часть", "на моей практике", "по опыту",
+        "самая частая ошибка", "в первую очередь", "как показывает практика",
+    )
 
     for c in claims:
         if not isinstance(c, dict):
@@ -534,6 +566,12 @@ def match_claims_to_facts(
         value = _normalize_value(str(c.get("value", "")))
         law = _normalize_value(str(c.get("law", "")))
         text_norm = _normalize_claim(text)
+        text_lower = text.lower()
+
+        # Предохранитель: наблюдение/комментарий — пропускаем, не трогаем.
+        if any(mk in text_lower for mk in OBSERVATION_MARKERS):
+            supported.append(c)
+            continue
 
         is_supported = False
 
@@ -1113,11 +1151,14 @@ def check_future_laws(text: str, today: str) -> List[Dict[str, Any]]:
         citation = str(law.get("citation", "")).strip()
         if not citation:
             continue
+        confidence = _to_float(law.get("confidence", 0))
+        if confidence < _FUTURE_CONFIDENCE_MIN:
+            continue
         problems.append({
             "citation": citation,
             "effective_date": str(law.get("effective_date", "") or "").strip(),
             "current_rule": str(law.get("current_rule", "") or "").strip(),
-            "confidence": _to_float(law.get("confidence", 0)),
+            "confidence": confidence,
             "sources": [s for s in (law.get("sources") or []) if isinstance(s, dict)],
         })
 
@@ -1125,7 +1166,35 @@ def check_future_laws(text: str, today: str) -> List[Dict[str, Any]]:
     return problems
 
 
-def hedge_future_laws(problems: List[Dict[str, Any]], today: str) -> List[Dict[str, str]]:
+def _sentence_with(draft: str, needle: str, max_len: int = 450) -> str:
+    """Детерминированно извлечь предложение из draft, содержащее needle."""
+    if not draft or not needle:
+        return ""
+    pos = draft.find(needle)
+    if pos < 0:
+        # Плавающая нормализация: ищем без учёта регистра первую половину ссылки
+        low = draft.lower()
+        n2 = needle[:max(10, len(needle) // 2)].lower()
+        pos = low.find(n2)
+    if pos < 0:
+        # Форма расходится («ст. 152» vs «Статья 152»): ищем по номеру нормы
+        for num in re.findall(r"\d+(?:\.\d+)*", needle):
+            if len(num) < 2:
+                continue
+            pos = draft.find(num)
+            if pos >= 0:
+                break
+    if pos < 0:
+        return ""
+    start = max(draft.rfind(". ", 0, pos) + 2, draft.rfind("! ", 0, pos) + 2,
+                draft.rfind("? ", 0, pos) + 2, draft.rfind("\n", 0, pos) + 1, 0)
+    ends = [i for i in (draft.find(". ", pos), draft.find("! ", pos),
+                        draft.find("? ", pos), draft.find("\n", pos)) if i > 0]
+    end = (min(ends) + 1) if ends else min(len(draft), pos + max_len)
+    return draft[start:end].strip()[:max_len]
+
+
+def hedge_future_laws(problems: List[Dict[str, Any]], today: str, draft: str = "") -> List[Dict[str, str]]:
     """
     Переписать предложения с будущими законами в будущее время.
 
@@ -1178,12 +1247,21 @@ def hedge_future_laws(problems: List[Dict[str, Any]], today: str) -> List[Dict[s
         },
     }
 
-    user_text = f"Сегодня: {today}. Перепиши предложения с будущими законами в будущее время:\n\n"
+    user_text = f"Сегодня: {today}. Перепиши предложения с будущими законами в будущее время.\n"
+    user_text += (
+        "Для каждого пункта приведено ТОЧНОЕ предложение из черновика. "
+        "В поле original верни его ДОСЛОВНО (без изменений), в поле hedged — переписанное.\n\n"
+    )
     for i, p in enumerate(problems[:8], 1):
         ed = p.get("effective_date", "")
         cr = p.get("current_rule", "")
-        note = f" (вступает с {ed}; текущий порядок: {cr})" if ed else ""
+        sentence = _sentence_with(draft, p.get("citation", ""))
+        note = f" (вступает в силу с {ed}; текущий порядок: {cr})" if ed else ""
         user_text += f"{i}. Норма: {p.get('citation', '')}{note}\n"
+        if sentence:
+            user_text += f"   Предложение из черновика: {sentence}\n"
+        else:
+            user_text += "   Предложение из черновика не найдено — составь его сам по норме выше.\n"
 
     parsed = _call_kie_generic(hedge_system, user_text, hedge_schema, cfg, use_grounding=False)
     if not isinstance(parsed, dict):
