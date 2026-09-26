@@ -413,19 +413,37 @@ def jev_enabled(feature_flag: str = "JEV_ROUTER_ENABLED") -> bool:
 # ============================================================
 
 def _load_local_env() -> None:
-    """Автономный запуск: подтянуть .env из корня проекта (в пайплайне его грузит generate.py)."""
+    """Автономный запуск: подтянуть .env из корня проекта (в пайплайне его грузит generate.py).
+
+    Без зависимости от python-dotenv: если пакет недоступен (например, системный
+    python3 на VPS), парсим .env вручную.
+    """
+    from pathlib import Path
+
+    candidates = (
+        Path(__file__).resolve().parent.parent / ".env",
+        Path(__file__).resolve().parent.parent.parent / ".env",
+    )
+    env_file = next((p for p in candidates if p.exists()), None)
+    if env_file is None:
+        return
+
     try:
         from dotenv import load_dotenv
-        from pathlib import Path
-        for candidate in (
-            Path(__file__).resolve().parent.parent / ".env",
-            Path(__file__).resolve().parent.parent.parent / ".env",
-        ):
-            if candidate.exists():
-                load_dotenv(candidate, override=False)
-                break
+        load_dotenv(env_file, override=False)
+        return
     except ImportError:
         pass
+
+    for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
 
 
 if __name__ == "__main__":
