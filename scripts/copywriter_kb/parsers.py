@@ -12,9 +12,12 @@ from typing import Optional
 logger = logging.getLogger("kb.parsers")
 
 
-def extract_text(file_path: Path) -> Optional[str]:
+def extract_text(file_path: Path, source_type: Optional[str] = None) -> Optional[str]:
     """
     Универсальная точка входа: определяет формат и вызывает нужный парсер.
+
+    source_type: "law" — юридический текст (не срезаем одиночные числа-строки:
+                 в законах это номера частей/пунктов, а не номера страниц).
 
     Returns:
         Чистый текст или None при ошибке
@@ -37,7 +40,7 @@ def extract_text(file_path: Path) -> Optional[str]:
     try:
         text = parser(file_path)
         if text:
-            text = _clean_text(text)
+            text = _clean_text(text, is_law=(source_type == "law"))
         return text if text and len(text) > 50 else None
     except Exception as e:
         logger.error(f"❌ Ошибка парсинга {file_path.name}: {e}")
@@ -68,49 +71,77 @@ def _parse_pdf(file_path: Path) -> str:
 
 def _parse_fb2(file_path: Path) -> str:
     """
-    Извлечь текст из FB2 по XML-тегам <p>, <title>, <section>.
+    Извлечь текст из FB2 по XML-тегам <p>, <title>, <v>, <subtitle>.
     FB2 — приоритетный формат для сохранения семантической структуры абзацев.
+
+    Особенности реальных FB2:
+    - именованные HTML-entities (&nbsp;, &mdash;), которые XML не знает;
+    - чтение ТОЛЬКО из <body> (раньше аннотация из <description> попадала в текст);
+    - битые файлы: фолбэк на lxml recover, затем на грубый regex.
     """
+    import html.entities
     import xml.etree.ElementTree as ET
 
-    # Читаем файл с автодетекцией кодировки
     raw_bytes = file_path.read_bytes()
     content = _decode_bytes(raw_bytes)
 
-    # FB2 namespace
-    # Пробуем найти namespace из корневого тега
-    ns_match = re.search(r'xmlns="([^"]+)"', content[:1000])
-    ns = {"fb": ns_match.group(1)} if ns_match else {}
+    # 1. Именованные entity, кроме XML-предопределённых, заменяем на символы
+    def _ent(m: "re.Match") -> str:
+        name = m.group(1)
+        return html.entities.html5.get(name + ";", m.group(0))
 
+    content = re.sub(r'&(?!amp;|lt;|gt;|quot;|apos;|#)([a-zA-Z][a-zA-Z0-9]*);', _ent, content)
+
+    root = None
     try:
         root = ET.fromstring(content)
     except ET.ParseError:
-        # Иногда FB2 содержит невалидный XML, пробуем без namespace
-        content = re.sub(r'xmlns="[^"]+"', '', content)
-        root = ET.fromstring(content)
+        try:
+            from lxml import etree as _lxml
+            parser = _lxml.XMLParser(recover=True, huge_tree=True)
+            root = _lxml.fromstring(content.encode("utf-8", "replace"), parser=parser)
+        except ImportError:
+            root = None
 
-    parts = []
+    if root is not None:
+        parts: list[str] = []
+        # Только тела документа: аннотация/издательские данные не должны попадать в текст
+        bodies = [el for el in root.iter() if _strip_ns(el.tag) == "body"]
+        scan = bodies if bodies else [root]
+        for el_root in scan:
+            for el in el_root.iter():
+                tag = _strip_ns(el.tag)
+                if tag == "title":
+                    title_text = _get_all_text(el)
+                    if title_text.strip():
+                        parts.append(f"\n## {title_text.strip()}\n")
+                elif tag == "p":
+                    p_text = _get_all_text(el)
+                    if p_text.strip():
+                        parts.append(p_text.strip())
+                elif tag == "v":
+                    v_text = _get_all_text(el)
+                    if v_text.strip():
+                        parts.append(v_text.strip())
+                elif tag == "subtitle":
+                    s_text = _get_all_text(el)
+                    if s_text.strip():
+                        parts.append(f"\n## {s_text.strip()}\n")
+                elif tag == "empty-line":
+                    parts.append("")
+        text = "\n".join(parts)
+        if len(text) > 200:
+            return text
 
-    # Извлекаем текст из <body>
-    for body in root.iter():
-        tag = _strip_ns(body.tag)
+    # 2. Грубый фолбэк: вырезать теги регуляркой
+    text = re.sub(r"<[^>]+>", " ", content)
+    text = html_re_unescape(text)
+    return re.sub(r"[ \t]{2,}", " ", text)
 
-        if tag == "title":
-            # Заголовки разделов
-            title_text = _get_all_text(body)
-            if title_text.strip():
-                parts.append(f"\n## {title_text.strip()}\n")
 
-        elif tag == "p":
-            # Абзацы
-            p_text = _get_all_text(body)
-            if p_text.strip():
-                parts.append(p_text.strip())
-
-        elif tag == "empty-line":
-            parts.append("")
-
-    return "\n".join(parts)
+def html_re_unescape(text: str) -> str:
+    import html
+    return html.unescape(text)
 
 
 def _strip_ns(tag: str) -> str:
@@ -266,14 +297,16 @@ def _decode_bytes(raw_bytes: bytes) -> str:
         return raw_bytes.decode("utf-8", errors="replace")
 
 
-def _clean_text(text: str) -> str:
+def _clean_text(text: str, is_law: bool = False) -> str:
     """Общая чистка текста после парсинга"""
     # Убираем лишние переносы строк (3+ → 2)
     text = re.sub(r'\n{3,}', '\n\n', text)
     # Убираем лишние пробелы/табы
     text = re.sub(r'[ \t]{2,}', ' ', text)
-    # Убираем одиночные номера страниц на отдельных строках
-    text = re.sub(r'^\d{1,4}$', '', text, flags=re.MULTILINE)
+    # Убираем одиночные номера страниц на отдельных строках.
+    # Для законов НЕ применяем: одиночные числа там — номера частей/пунктов.
+    if not is_law:
+        text = re.sub(r'^\d{1,4}$', '', text, flags=re.MULTILINE)
     # Убираем BOM и нулевые символы
     text = text.replace('\ufeff', '').replace('\x00', '')
     return text.strip()

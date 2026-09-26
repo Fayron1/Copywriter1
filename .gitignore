@@ -43,3 +43,6 @@ Article Styles/
 backup_before_update/
 Обновление/
 viktor_media/
+
+# New KB source (large binaries)
+knowledge_base/
