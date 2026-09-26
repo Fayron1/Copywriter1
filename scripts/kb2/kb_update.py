@@ -238,12 +238,17 @@ def daily_expiry_check(state: Dict[str, str]) -> None:
     today = datetime.now().strftime("%Y-%m-%d")
     try:
         from qdrant_client import QdrantClient
-        from qdrant_client.models import Filter, FieldCondition, Range
+        from qdrant_client import models
         client = QdrantClient(
             url=f"http://{os.getenv('QDRANT_HOST', '127.0.0.1')}:{os.getenv('QDRANT_PORT', '6333')}",
             api_key=os.getenv("QDRANT_API_KEY") or None, timeout=30)
         collection = os.getenv("KB_COLLECTION", "kb_v2")
-        flt = Filter(must=[FieldCondition(key="valid_until", range=Range(lt=today))])
+        # Даты: DatetimeRange; на старых версиях клиента — Range с датой в значении
+        try:
+            rng = models.DatetimeRange(lt=today)
+        except AttributeError:
+            rng = models.Range(lt=today)
+        flt = Filter(must=[FieldCondition(key="valid_until", range=rng)])
         count = client.count(collection_name=collection, count_filter=flt, exact=True).count
         if count:
             notify(f"🕒 {count} точек отчётов устарели (valid_until < {today}) — из поиска они уже исключены фильтром.")
