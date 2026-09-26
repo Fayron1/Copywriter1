@@ -12,6 +12,85 @@ class ArticleRouter:
     """
     _cache = {}
 
+    _JEV_VALID_TYPES = {"checklist", "law_review", "case_study", "reference", "analysis", "free_style"}
+
+    @staticmethod
+    def _classify_with_jev(topic: str, description: str, keywords: List[str], size: str):
+        """
+        Классификация типа статьи через Jev AI (один systemOne-вызов, 5 вопросов).
+
+        Возвращает (article_type, enrichments, reason) или (None, [], "") при любом
+        сбое — вызывающий код молча уходит на LLM/keyword-фолбэк. Пайплайн не роняет.
+        """
+        try:
+            from .jev_client import get_jev_client, choice_question, noul_question, JevBalanceError
+            client = get_jev_client()
+            if client is None:
+                return None, [], ""
+
+            decision = client.decide(
+                state={
+                    "task": "routing",
+                    "topic": topic,
+                    "description": description or "",
+                    "keywords": list(keywords or []),
+                    "size": size or "medium",
+                },
+                questions={
+                    "article_type": choice_question(
+                        "Определи основной тип B2B-статьи по теме, описанию и ключевым словам.",
+                        {
+                            "checklist": "Чек-лист, список советов или пунктов",
+                            "law_review": "Разбор законов, поправок, ФЗ, НК РФ",
+                            "case_study": "Реальный пример, кейс, опыт компании",
+                            "reference": "Справочник, таблицы ставок, штрафы, лимиты",
+                            "analysis": "Глубокий анализ, исследование рынка, обзор трендов",
+                            "free_style": "Свободная тема, не подходит ни под что выше",
+                        },
+                    ),
+                    "enr_case_scene": noul_question(
+                        "Уместен ли в статье живой микро-кейс из жизни бизнеса?"
+                    ),
+                    "enr_table": noul_question(
+                        "Уместна ли сравнительная таблица для наглядности?"
+                    ),
+                    "enr_important_box": noul_question(
+                        "Уместен ли выделенный блок с предупреждением или важным советом?"
+                    ),
+                    "enr_faq": noul_question(
+                        "Уместен ли блок FAQ с частыми вопросами в конце?"
+                    ),
+                },
+            )
+
+            article_type = decision.choice("article_type")
+            if article_type not in ArticleRouter._JEV_VALID_TYPES:
+                return None, [], ""
+
+            # Enrichments: максимум 2 самых уверенных (порог 0.6), как в LLM-промпте.
+            probs = {
+                "case_scene": decision.yes("enr_case_scene", 0.0) or 0.0,
+                "table": decision.yes("enr_table", 0.0) or 0.0,
+                "important_box": decision.yes("enr_important_box", 0.0) or 0.0,
+                "faq": decision.yes("enr_faq", 0.0) or 0.0,
+            }
+            enrichments = [
+                name for name, p in sorted(probs.items(), key=lambda kv: -kv[1])
+                if p >= 0.6
+            ][:2]
+
+            ans = decision.get("article_type")
+            reason = f"Jev AI (confidence={ans.confidence})" if ans else "Jev AI"
+            return article_type, enrichments, reason
+
+        except JevBalanceError as e:
+            import logging
+            logging.getLogger("agents.router").warning(f"Jev: баланс исчерпан ({e}) — фолбэк на LLM")
+        except Exception as e:
+            import logging
+            logging.getLogger("agents.router").warning(f"Jev: сбой роутинга ({e}) — фолбэк на LLM")
+        return None, [], ""
+
     @staticmethod
     def route(topic: str, description: str, size: str, keywords: List[str], custom_chars: int = 0) -> Dict[str, Any]:
         """
@@ -23,11 +102,24 @@ class ArticleRouter:
             return ArticleRouter._cache[cache_key]
         desc_lower = (description or "").lower()
         topic_lower = topic.lower()
-        
-        # 1. Попытка классификации через легкую LLM (DeepSeek Flash или OpenAI)
+
         article_type = None
         enrichments = []
         reason = ""
+
+        # 1. Jev AI decision-слой: дёшево, ~1с, калиброванные вероятности.
+        #    Любой сбой (нет ключа/баланса/сеть) -> тихий фолбэк на п.2 (LLM/ключевые слова).
+        if os.getenv("JEV_ROUTER_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off"):
+            jev_type, jev_enrichments, jev_reason = ArticleRouter._classify_with_jev(
+                topic, description, keywords, size
+            )
+            if jev_type:
+                article_type = jev_type
+                enrichments = jev_enrichments
+                reason = jev_reason
+
+        # 2. Классификация через легкую LLM (DeepSeek Flash или OpenAI) —
+        #    только если Jev не ответил (нет ключа/сбой/баланс).
         
         deepseek_key = os.getenv("DEEPSEEK_API_KEY")
         deepseek_base = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com/v1")
@@ -45,7 +137,7 @@ class ArticleRouter:
             client = OpenAI(api_key=openai_key)
             model_name = openai_model
 
-        if client:
+        if client and not article_type:
             system_prompt = (
                 "Ты — интеллектуальный роутер для B2B-контента.\n"
                 "Определи основной тип статьи и 1-2 точечных элемента (enrichments) для ее очеловечивания.\n"
