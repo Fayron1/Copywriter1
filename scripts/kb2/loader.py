@@ -325,6 +325,31 @@ def upload(client, points: List[Dict[str, Any]]) -> int:
     return uploaded
 
 
+def prune_folder(client, folder_key: str, live_sources: List[str]) -> int:
+    """
+    Удалить точки папки, чьи source_file больше не существуют на диске
+    (заменили файл свежей редакцией / убрали из подборки).
+    Идемпотентные ID не знают об удалениях — этот проход закрывает дыру.
+    """
+    from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny, FilterSelector
+    flt = Filter(
+        must=[FieldCondition(key="domain", match=MatchValue(value=folder_key))],
+        must_not=[FieldCondition(key="source_file", match=MatchAny(any=live_sources))],
+    )
+    try:
+        before = client.count(collection_name=COLLECTION,
+                              count_filter=flt, exact=True).count
+        if before == 0:
+            return 0
+        client.delete(collection_name=COLLECTION, points_selector=FilterSelector(filter=flt))
+        logger.info(f"   🧹 prune {folder_key}: удалено {before} осиротевших точек "
+                    f"(файлов на диске: {len(live_sources)})")
+        return before
+    except Exception as e:
+        logger.warning(f"   ⚠️ prune {folder_key} не удался: {e}")
+        return 0
+
+
 # ============================================================
 # Обработка
 # ============================================================
@@ -392,6 +417,8 @@ def process_folder(folder_key: str, dry_run: bool = False, limit: Optional[int] 
     if dry_run or not pending_points:
         return stats
 
+    live_sources = [f"{folder_key}/{f.name}" for f in files]
+
     # Эмбеддинги батчами (локальные, e5) и заливка
     for i in range(0, len(pending_points), EMBED_BATCH):
         batch = pending_points[i:i + EMBED_BATCH]
@@ -407,6 +434,10 @@ def process_folder(folder_key: str, dry_run: bool = False, limit: Optional[int] 
         stats["uploaded"] += upload(client, points)
         if (i // EMBED_BATCH) % 10 == 0:
             logger.info(f"   ⏳ залито {stats['uploaded']}/{len(pending_points)}")
+
+    # Чистка осиротевших точек (только полный прогон папки, без --limit)
+    if limit is None:
+        stats["pruned"] = prune_folder(client, folder_key, live_sources)
 
     return stats
 
