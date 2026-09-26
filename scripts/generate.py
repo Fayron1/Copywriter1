@@ -1185,11 +1185,13 @@ def main():
 
     args = parser.parse_args()
 
-    # Проверка API ключа
-    api_key = os.getenv("OPENAI_API_KEY", "")
-    if not api_key:
-        logger.error("❌ OPENAI_API_KEY не найден в .env!")
+    # Проверка API ключей: DeepSeek — основной провайдер генерации.
+    # OpenAI нужен только для provider=openai и генерации изображений.
+    if not os.getenv("DEEPSEEK_API_KEY", ""):
+        logger.error("❌ DEEPSEEK_API_KEY не найден в .env (основной провайдер генерации)!")
         sys.exit(1)
+    if not os.getenv("OPENAI_API_KEY", ""):
+        logger.warning("⚠️ OPENAI_API_KEY не задан: provider=openai и генерация изображений недоступны")
 
     # Переопределение модели (если указано)
     if args.model_override:

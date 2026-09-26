@@ -22,10 +22,15 @@ from typing import Dict, List, Optional, Any
 # Конфигурация RAG-запросов к Qdrant
 # ============================================================
 
+# Единая коллекция БЗ (kb_v2: локальные e5-эмбеддинги, loader scripts/kb2).
+# Переопределяется через env без правки кода.
+KB_COLLECTION = os.getenv("KB_COLLECTION", "kb_v2")
+
+
 @dataclass
 class RagConfig:
     """Настройки запросов агента к Qdrant."""
-    collection: str = "copywriter_kb"
+    collection: str = KB_COLLECTION
     top_k: int = 10
     score_threshold: float = 0.3
     filters: Dict[str, Any] = field(default_factory=dict)
@@ -135,7 +140,6 @@ AGENTS: Dict[str, AgentConfig] = {
         input_from=["admin"],
         output_to=["fact_finder", "scout", "engineer"],
         rag=RagConfig(
-            collection="copywriter_kb",
             top_k=5,
             filters={"source_type": ["workflow", "reference"]},
             payload_fields=["text", "source_type", "chunk_type"],
@@ -156,7 +160,6 @@ AGENTS: Dict[str, AgentConfig] = {
         input_from=["brain"],
         output_to=["engineer", "scout"],
         rag=RagConfig(
-            collection="copywriter_kb",
             top_k=20,           # Много результатов — нужна полнота
             score_threshold=0.25,
             filters={"agent_target": "fact_finder"},
@@ -184,7 +187,6 @@ AGENTS: Dict[str, AgentConfig] = {
         input_from=["brain", "fact_finder"],
         output_to=["engineer", "booster"],
         rag=RagConfig(
-            collection="copywriter_kb",
             top_k=5,
             filters={"agent_target": "booster"},
             payload_fields=["text", "source_type"],
@@ -206,7 +208,6 @@ AGENTS: Dict[str, AgentConfig] = {
         input_from=["fact_finder", "scout", "brain"],
         output_to=["heart"],
         rag=RagConfig(
-            collection="copywriter_kb",
             top_k=10,
             filters={"agent_target": "engineer"},
             payload_fields=[
@@ -232,7 +233,6 @@ AGENTS: Dict[str, AgentConfig] = {
         retry_on_fail=3,        # 3 попытки по фидбеку Sheriff
         top_p=0.9,             # Параметр сэмплинга top_p для A B тестирования
         rag=RagConfig(
-            collection="copywriter_kb",
             top_k=10,
             filters={"agent_target": "heart"},
             payload_fields=[
@@ -256,7 +256,6 @@ AGENTS: Dict[str, AgentConfig] = {
         input_from=["heart", "fact_finder"],
         output_to=["heart", "mirror", "booster"],
         rag=RagConfig(
-            collection="copywriter_kb",
             top_k=10,
             filters={"agent_target": "sheriff"},
             payload_fields=[
@@ -299,7 +298,6 @@ AGENTS: Dict[str, AgentConfig] = {
         input_from=["mirror", "scout"],
         output_to=["artist", "publisher"],
         rag=RagConfig(
-            collection="copywriter_kb",
             top_k=10,
             filters={"agent_target": "booster"},
             payload_fields=[
@@ -323,7 +321,6 @@ AGENTS: Dict[str, AgentConfig] = {
         input_from=["booster", "engineer"],
         output_to=["publisher"],
         rag=RagConfig(
-            collection="copywriter_kb",
             top_k=5,
             filters={"agent_target": "artist"},
             payload_fields=[
