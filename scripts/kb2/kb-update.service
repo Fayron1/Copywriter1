@@ -1,0 +1,15 @@
+[Unit]
+Description=KB Update daemon (Telegram intake + daily checks)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/Copywriter1
+ExecStart=/root/Copywriter1/venv/bin/python scripts/kb2/kb_update.py
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
