@@ -334,14 +334,16 @@ def check_draft(draft: str, params_field) -> List[str]:
     return issues
 
 
-def enforce_params(text: str, params_field) -> tuple:
+def enforce_params(text: str, params_field, article_year: int = 0) -> tuple:
     """
     Принудительная петля: детерминированная замена устаревших чисел на действующие.
-    Возвращает (исправленный_текст, список_замен). Затрагивает ТОЛЬКО числовые
-    значения из чёрного списка (old_value), которых нет среди действующих.
+    Работает ВСЕГДА, даже без паспорта (кейс: RAG-чанк с «60 млн» в статье 2026 —
+    старые пороги НДС-освобождения заменяются по KNOWN_FUTURE_RULES/LEGACY_VALUES).
+    Возвращает (исправленный_текст, список_замен).
     """
     if not text:
         return text, []
+    fixes = []
     params, _ = _unwrap(params_field)
     fixes = []
     for p in params:
@@ -355,20 +357,67 @@ def enforce_params(text: str, params_field) -> tuple:
                 if needle in text:
                     text = text.replace(needle, cur_first)
                     fixes.append(f"{needle} → {cur_first} ({p.get('name','?')})")
-    # Детерминированное удаление псевдо-экспертности (Heart не убирает из промпта)
+    # Детерминированное удаление псевдо-экспертности (Heart не убирает из промпта).
+    # Работает ВСЕГДА, без паспорта — это глобальный стоп-паттерн.
     _PSEUDO = [
         ("на моей практике как", "при аудите подобных систем"),
         ("на моей практике", "в практике отрасли"),
         ("в моей практике", "в практике отрасли"),
         ("я сопровождал", "специалисты сопровождали"),
         ("мы защищали", "специалисты защищали"),
+        ("налоговый консультант,", "специалисты,"),
+        ("как налоговый консультант", ""),
+        ("как юрист", ""),
+        ("как IT-юриста", ""),
+        ("как бухгалтер", ""),
     ]
     for old, new in _PSEUDO:
         if old in text.lower():
             import re as _re
             text = _re.sub(_re.escape(old), new, text, flags=_re.IGNORECASE)
             fixes.append(f"псевдо-эксперт: «{old}» → «{new}»")
+    # ── LEGACY VALUES: замена известных устаревших порогов даже БЕЗ паспорта.
+    # Кейс: «60 млн» (порог 2024-2025) просачивается из RAG-чанков старых статей.
+    for legacy in _LEGACY_VALUES:
+        if article_year and article_year >= legacy["min_year"]:
+            current = legacy["current"]
+            name = legacy["name"]
+            for old_num in legacy["old_numbers"]:
+                if old_num in current["numbers"]:
+                    continue
+                # Замена полного вида «60 млн» и «60 000 000»
+                for form in legacy["old_numbers_forms"]:
+                    if form in text:
+                        text = text.replace(form, current["replacement"])
+                        fixes.append(f"legacy: {form} → {current['replacement']} ({name})")
     return text, fixes
+
+
+# Известные устаревшие значения (обновляется при изменении норм).
+# Числа сравниваются в двух формах: «60 млн» и «60 000 000».
+_LEGACY_VALUES = [
+    {
+        "name": "порог освобождения от НДС при УСН",
+        "old_numbers": ["60"],
+        "old_numbers_forms": ["60 млн", "60 000 000", "60 млн ₽", "60 млн руб"],
+        "current": {"numbers": ["20"], "replacement": "20 млн"},
+        "min_year": 2026,
+    },
+    {
+        "name": "основная ставка НДС",
+        "old_numbers": ["20"],
+        "old_numbers_forms": ["20%", "20 %"],
+        "current": {"numbers": ["22"], "replacement": "22%"},
+        "min_year": 2026,
+    },
+    {
+        "name": "лимит доходов УСН",
+        "old_numbers": ["450"],
+        "old_numbers_forms": ["450 млн", "450 000 000"],
+        "current": {"numbers": ["490"], "replacement": "490,5 млн"},
+        "min_year": 2026,
+    },
+]
 
 
 def check_matrix_compliance(draft: str, params_field) -> List[str]:

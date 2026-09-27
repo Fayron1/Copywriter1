@@ -733,7 +733,9 @@ class Pipeline:
                             state.draft = tbl_text
                             logger.info(f"   🔧 Markdown-таблицы: исправлено разделителей: {tbl_fixes}")
                         # 1. Детерминированные замены устаревших чисел
-                        fixed_text, fixes = enforce_params(state.final_article or "", _np)
+                        fixed_text, fixes = enforce_params(
+                            state.final_article or "", _np,
+                            article_year=getattr(state, "article_year", 0) or 2026)
                         if fixes:
                             state.final_article = fixed_text
                             state.draft = fixed_text
