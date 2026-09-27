@@ -1049,14 +1049,27 @@ def save_result(state, output_dir: Path):
     passport_lines.append("------------------------------------------------------------")
     passport_lines.append("PUBLISH GATE:")
     passport_lines.append(f"Данные актуальны на: {datetime.now().strftime('%Y-%m-%d')}")
-    norm_params = getattr(state, 'norm_params', None) or []
-    if norm_params:
-        passport_lines.append(f"Паспорт параметров (год x норма): {len(norm_params)} зафиксировано")
-        for p in norm_params:
-            line = f"  • {p['name']}: {p['value']}"
+    try:
+        from agents.norm_params import _unwrap
+        norm_p, norm_scen = _unwrap(getattr(state, 'norm_params', None))
+    except Exception:
+        norm_p, norm_scen = getattr(state, 'norm_params', None) or [], []
+    if norm_p:
+        passport_lines.append(f"Паспорт параметров (год x норма): {len(norm_p)} зафиксировано")
+        for p in norm_p:
+            if not isinstance(p, dict):
+                continue
+            line = f"  • {p.get('name','?')}: {p.get('value','?')}"
             if p.get('old_value'):
                 line += f"  (устарело: {p['old_value']})"
             passport_lines.append(line)
+    if norm_scen:
+        passport_lines.append(f"Сценарная матрица: {len(norm_scen)} строк(и)")
+        for s in norm_scen:
+            if isinstance(s, dict):
+                passport_lines.append(f"  • {s.get('status_before','?')} → {s.get('regime_after','?')} "
+                                      f"(событие: {s.get('event','?')}, дата: {s.get('effect_date','?')}, "
+                                      f"срок: {s.get('deadline','—')})")
     validation_warnings = getattr(state, 'final_warnings', []) or []
     critical = [w for w in validation_warnings if w.startswith('🔴')]
     yellow = [w for w in validation_warnings if w.startswith('🟡')]
