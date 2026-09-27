@@ -161,12 +161,25 @@ def kb_support(query: str, top_k: int = 3) -> float:
         return 0.0
 
 
+_DEMAND_CACHE = {}
+_DEMAND_LAST = [0.0]
+
+
 def demand_hits(query: str) -> int:
     """Число подсказок Яндекса, пересекающихся с темой (proxy спроса).
-    Yandex suggest фильтрует TLS-отпечаток requests — зовём настоящий curl."""
+    Yandex suggest фильтрует TLS-отпечаток requests И блокирует за частые
+    запросы (после ~60 подряд отвечает 404) — поэтому: настоящий curl,
+    пауза >=1.5с между запросами и кэш."""
     try:
         import subprocess
+        import time
         import urllib.parse
+        if query in _DEMAND_CACHE:
+            return _DEMAND_CACHE[query]
+        pause = 1.5 - (time.time() - _DEMAND_LAST[0])
+        if pause > 0:
+            time.sleep(pause)
+        _DEMAND_LAST[0] = time.time()
         core = urllib.parse.quote(" ".join(query.split()[:3]))
         out = subprocess.run(
             ["curl", "-s", "-m", "10",
@@ -182,6 +195,7 @@ def demand_hits(query: str) -> int:
             sw = set(re.findall(r"[а-яё]{4,}", str(s).lower()))
             if len(words & sw) >= 2:
                 hits += 1
+        _DEMAND_CACHE[query] = hits
         return hits
     except Exception as e:
         logger.warning(f"demand сбой: {e}")
