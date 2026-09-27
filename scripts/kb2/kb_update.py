@@ -240,8 +240,25 @@ def daily_pravo_check(state: Dict[str, str]) -> None:
     save_state(state)
 
 
-# Мониторимые документы для наблюдателя поправок (через Vane/Яндекс)
-AMENDMENT_WATCH_DOCS = ["НК РФ", "ТК РФ", "ГК РФ", "КоАП РФ", "152-ФЗ персональные данные"]
+# Мониторимые документы для наблюдателя поправок (через Vane/Яндекс).
+# Приоритет источников по группам (рекомендация от 2026-09-27):
+#   кодексы/ФЗ — pravo.gov.ru (недоступен с VPS) -> base.garant.ru / consultant.ru;
+#   налоговые разъяснения — nalog.gov.ru / minfin.gov.ru;
+#   судебная практика — vsrf.ru.
+# base.garant.ru доступен с VPS и отдаёт полные тексты (cp1251) — основной
+# источник автоскачивания консолидированных редакций.
+AMENDMENT_WATCH_DOCS = [
+    {"name": "НК РФ", "query": "НК РФ", "sources": "garant.ru, consultant.ru, nalog.gov.ru"},
+    {"name": "ТК РФ", "query": "ТК РФ", "sources": "garant.ru, consultant.ru"},
+    {"name": "ГК РФ", "query": "ГК РФ", "sources": "garant.ru, consultant.ru"},
+    {"name": "КоАП РФ", "query": "КоАП РФ", "sources": "garant.ru, consultant.ru"},
+    {"name": "152-ФЗ", "query": "152-ФЗ о персональных данных",
+     "sources": "garant.ru, consultant.ru, roskomnadzor.gov.ru"},
+    {"name": "44-ФЗ / 223-ФЗ", "query": "44-ФЗ и 223-ФЗ закупки",
+     "sources": "garant.ru, consultant.ru, zakupki.gov.ru"},
+    {"name": "письма ФНС и Минфина", "query": "новые письма ФНС и Минфина налоги",
+     "sources": "nalog.gov.ru, minfin.gov.ru, consultant.ru"},
+]
 AMENDMENT_WATCH_ENABLED = os.getenv("AMENDMENT_WATCH", "1").strip().lower() not in ("0", "false", "no")
 
 
@@ -259,23 +276,25 @@ def daily_amendment_watch(state: Dict[str, str]) -> None:
         for doc in AMENDMENT_WATCH_DOCS:
             try:
                 res = vane_research(
-                    f"Приняты ли новые поправки в {doc} в {month_name} {datetime.now().year} года? "
-                    f"Только свежие изменения с датами и номерами законов.")
+                    f"Приняты ли новые поправки в {doc['query']} в {month_name} {datetime.now().year} года? "
+                    f"Только свежие изменения с датами и номерами законов. "
+                    f"Приоритетные источники: {doc['sources']}.")
                 msg = (res.get("message") or "").strip()
                 # Эвристика свежести: месяц/год или фразы о принятии
                 fresh = (month_name in msg.lower()
                          or f"{datetime.now().year}" in msg)
                 if msg and fresh and "не удалось" not in msg[:60]:
-                    findings.append(f"📄 {doc}:\n{msg[:700]}")
+                    findings.append(f"📄 {doc['name']}:\n{msg[:700]}")
             except Exception as e:
-                logger.warning(f"[watch] {doc}: {e}")
+                logger.warning(f"[watch] {doc['name']}: {e}")
     except ImportError:
         logger.warning("[watch] agents.vane недоступен — наблюдатель пропущен")
 
     if findings:
         notify("🔔 Наблюдатель законодательства: возможные свежие поправки.\n\n"
                + "\n\n".join(findings)[:3500]
-               + "\n\nПроверь и при необходимости пришли свежую редакцию файла мне.")
+               + "\n\nПроверь и при необходимости пришли свежую редакцию файла мне. "
+                 "Свежие редакции удобно брать на base.garant.ru (полные тексты).")
     state["watch_last_check"] = today
     save_state(state)
 
@@ -392,6 +411,9 @@ def handle_update(upd: Dict[str, Any]) -> None:
                 "sha256": sha256_of(dest),
                 "edition_hint": next(iter(re.findall(r"(20\d{2})", filename)), ""),
                 "received": datetime.now().strftime("%Y-%m-%d"),
+                # Метаданные провенанса (рекомендация по контролю актуальности):
+                # заполняются из подписи к файлу в формате «source: URL» либо вручную.
+                "source_url": next(iter(re.findall(r"source:\s*(https?://\S+)", msg.get("caption", "") or "")), ""),
                 "monitor": MONITOR_KEYWORDS,
             }
             save_manifest(m)
