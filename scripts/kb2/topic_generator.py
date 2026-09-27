@@ -162,21 +162,19 @@ def kb_support(query: str, top_k: int = 3) -> float:
 
 
 def demand_hits(query: str) -> int:
-    """Число подсказок Яндекса, пересекающихся с темой (proxy спроса)."""
+    """Число подсказок Яндекса, пересекающихся с темой (proxy спроса).
+    Yandex suggest фильтрует TLS-отпечаток requests — зовём настоящий curl."""
     try:
-        import requests as rq
+        import subprocess
         import urllib.parse
         core = urllib.parse.quote(" ".join(query.split()[:3]))
-        # Точный профиль curl-запроса: Yandex suggest капризен к заголовкам клиентов
-        r = rq.get(
-            f"https://suggest.yandex.ru/suggest-ff?part={core}&utf=1",
-            timeout=10,
-            headers={"User-Agent": "curl/8.5.0", "Accept": "*/*"},
-        )
-        text = r.text.strip()
-        if not text.startswith("["):
+        out = subprocess.run(
+            ["curl", "-s", "-m", "10",
+             f"https://suggest.yandex.ru/suggest-ff?part={core}&utf=1"],
+            capture_output=True, text=True, timeout=15).stdout.strip()
+        if not out.startswith("["):
             return -1
-        data = json.loads(text)
+        data = json.loads(out)
         suggs = data[1] if len(data) > 1 else []
         words = set(re.findall(r"[а-яё]{4,}", query.lower()))
         hits = 0
