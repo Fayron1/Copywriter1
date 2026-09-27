@@ -18,8 +18,14 @@ for env_path in [
         break
 
 # ============================================================
-# OpenAI (только эмбеддинги в KB-конвейере)
+# Эмбеддинги: ЛОКАЛЬНЫЕ по умолчанию (OpenAI отключён)
+# EMBEDDING_PROVIDER=local  — sentence-transformers (scripts/embedding_system)
+# EMBEDDING_PROVIDER=openai — старый путь через OpenAI (платный)
 # ============================================================
+EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "local").strip().lower()
+LOCAL_EMBEDDING_MODEL = os.getenv("LOCAL_EMBEDDING_MODEL", "intfloat/multilingual-e5-base").strip()
+
+# --- ветка OpenAI (используется только при EMBEDDING_PROVIDER=openai) ---
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 EMBEDDING_MODEL = "text-embedding-3-large"         # Embeddings (апгрейд с ada-002)
 EMBEDDING_DIM = 3072                               # Размерность вектора
@@ -44,7 +50,9 @@ DISTILL_MODEL = (
 QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
 QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", "")
-COLLECTION_NAME = "copywriter_kb"
+# Имя коллекции можно переопределить (нужно при пересборке базы на другой
+# размерности вектора): KB_COLLECTION_NAME=copywriter_kb_v2
+COLLECTION_NAME = os.getenv("KB_COLLECTION_NAME", "copywriter_kb")
 
 # ============================================================
 # Пути
