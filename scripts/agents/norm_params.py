@@ -108,11 +108,20 @@ def lint_year_rules(text: str, year: int, params_field) -> List[str]:
     params, _ = _unwrap(params_field)
     if year in KNOWN_FUTURE_RULES:
         for rule_key, rule in KNOWN_FUTURE_RULES[year].items():
-            # Число из «20 000 000» — первое число строки (пробелы не блокируют)
-            cur_val_num = re.search(r"(\d[\d\s]*\d|\d)", rule["current_2026"])
-            if cur_val_num and cur_val_num.group(1).replace(" ", "") in text.replace(" ", ""):
-                all_param_values = " ".join(p.get("value", "") for p in params)
-                if rule["expected_2027"][:3].replace(" ", "") not in all_param_values.replace(" ", ""):
+            # «20 000 000» в тексте может быть «20 млн» — нормализуем обе формы
+            cur_num = re.search(r"(\d[\d\s]*\d|\d)", rule["current_2026"])
+            if not cur_num:
+                continue
+            n = cur_num.group(1).replace(" ", "")
+            # Число в тексте: полная форма (20000000) ИЛИ сокращённая (20 млн)
+            full_form = n in text.replace(" ", "")
+            m = re.search(r"(\d+)\s*млн", text, re.I)
+            short_form = bool(m and n.rstrip("0") and m.group(1).lstrip("0") == n[:len(m.group(1).lstrip("0"))][:3].lstrip("0")
+                              and (len(n.rstrip("0")) <= 3 or n.rstrip("0")[:1] == m.group(1)))
+            short_match = bool(re.search(rf"{int(n[:len(n)-6] or n)}\s*млн", text, re.I)) if len(n) >= 7 else False
+            if full_form or short_match or short_form:
+                all_param_values = " ".join(p.get("value", "") for p in params).replace(" ", "")
+                if rule["expected_2027"][:3].replace(" ", "") not in all_param_values:
                     issues.append(
                         f"🔴 ПАСПОРТ {year}: параметр «{rule_key}» — в паспорте нет значения "
                         f"{rule['expected_2027']} (действует {rule['current_2026']} только в 2026). "
