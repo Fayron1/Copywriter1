@@ -1044,7 +1044,30 @@ def save_result(state, output_dir: Path):
         passport_lines.append("Детализация по агентам:")
         for aid, d in tokens_by_agent.items():
             passport_lines.append(f"  - {aid}: {d['prompt'] + d['completion']:,} токенов ({d['calls']} вызовов)")
-            
+
+    # Publish-gate: карточка качества «минимальным баллом» + конфликт версий «год x норма»
+    passport_lines.append("------------------------------------------------------------")
+    passport_lines.append("PUBLISH GATE:")
+    passport_lines.append(f"Данные актуальны на: {datetime.now().strftime('%Y-%m-%d')}")
+    norm_params = getattr(state, 'norm_params', None) or []
+    if norm_params:
+        passport_lines.append(f"Паспорт параметров (год x норма): {len(norm_params)} зафиксировано")
+        for p in norm_params:
+            line = f"  • {p['name']}: {p['value']}"
+            if p.get('old_value'):
+                line += f"  (устарело: {p['old_value']})"
+            passport_lines.append(line)
+    validation_warnings = getattr(state, 'final_warnings', []) or []
+    critical = [w for w in validation_warnings if w.startswith('🔴')]
+    yellow = [w for w in validation_warnings if w.startswith('🟡')]
+    publish_allowed = not critical
+    passport_lines.append(f"Критических ошибок: {len(critical)} | предупреждений: {len(yellow)}")
+    for w in critical[:10]:
+        passport_lines.append(f"  {w}")
+    for w in yellow[:10]:
+        passport_lines.append(f"  {w}")
+    passport_lines.append(f"PUBLISH_ALLOWED: {'ДА' if publish_allowed else 'НЕТ — требуется правка/юрпроверка'}")
+
     passport_lines.append("============================================================")
     passport_path = output_dir / "passport.txt"
     try:

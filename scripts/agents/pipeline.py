@@ -714,6 +714,8 @@ class Pipeline:
 
                 # Финальная валидация (без API)
                 validation_warnings = self._validate_final(state)
+                # Сохраняем для publish-gate в паспорте статьи (generate.py)
+                state.final_warnings = validation_warnings
                 for w in validation_warnings:
                     logger.warning(w)
 
@@ -896,6 +898,21 @@ class Pipeline:
         # Постфильтр: отбрасываем факты с очень низкой надёжностью (secondary без URL).
         # Это детерминированная защита от мусорных сниппетов до того, как они попадут в Heart.
         self._filter_low_reliability_facts(state)
+
+        # Паспорт параметров «год x норма» (строгие темы): действующие пороги/ставки
+        # на год статьи + чёрный список устаревших. Контроль конфликта версий —
+        # кейс «НДС 5% при УСН» (60 млн / 20% из 2025-го вместо 20 млн / 22%).
+        if self._is_strict_topic(state.topic, state.description):
+            try:
+                import datetime
+                from .norm_params import get_norm_params
+                state.norm_params = get_norm_params(
+                    state.topic, datetime.datetime.now().year)
+                if state.norm_params:
+                    logger.info(f"   📌 Паспорт параметров: {len(state.norm_params)} "
+                                f"действующих значений зафиксировано")
+            except Exception as e:
+                logger.warning(f"   ⚠️ Паспорт параметров пропущен: {e}")
 
         state.steps_completed.append("fact_finder")
 
@@ -1327,6 +1344,18 @@ class Pipeline:
         chunks = query_knowledge(state.topic, "heart", self.qdrant)
         if chunks:
             rag_block = format_rag_context(chunks, max_chars=4000)
+
+        # ЗАФИКСИРОВАННЫЕ ПАРАМЕТРЫ (год x норма) — закон для писателя:
+        # старее года статьи значения запрещены, отклонение = брак.
+        _params = getattr(state, "norm_params", None)
+        if _params:
+            try:
+                import datetime
+                from .norm_params import format_params_block
+                rag_block = format_params_block(
+                    _params, datetime.datetime.now().year) + "\n\n" + rag_block
+            except Exception as e:
+                logger.warning(f"   ⚠️ Блок параметров не встроен: {e}")
 
         # Дополнительно извлекаем премиальные B2B образцы стиля из базы знаний (Few shot anchors)
         style_chunks = query_knowledge("пример премиального B2B текста", "heart", self.qdrant, extra_filters={"chunk_type": "style_anchor"})
@@ -4177,6 +4206,17 @@ class Pipeline:
         text = state.final_article or ""
         if not text:
             return ["🔴 Финальная статья пуста!"]
+
+        # 0. Конфликт версий «год x норма»: устаревшие значения в тексте
+        # (детерминированно; кейс: 60 млн / 20% из 2025-го в статье 2026 года)
+        _params = getattr(state, "norm_params", None)
+        if _params:
+            try:
+                from .norm_params import check_draft
+                for issue in check_draft(text, _params):
+                    warnings.append(issue)
+            except Exception as e:
+                logger.warning(f"Сверка параметров пропущена: {e}")
 
         # 1. Проверка длины
         target = state.custom_chars
