@@ -983,8 +983,9 @@ class Pipeline:
                 from .norm_params import get_norm_params
                 # Целевой год статьи: «в 2027», «с 2027» и т.п. в теме/ТЗ — паспорт на этот год.
                 # Иначе текущий год. (Кейс: статья про 2027 с паспортом 2026 -> порог 20 вместо 15 млн.)
+                import re as _year_re
                 _year = datetime.datetime.now().year
-                _ym = _re.search(r"(20[2-9]\d)", (state.topic or "") + " " + (state.description or ""))
+                _ym = _year_re.search(r"(20[2-9]\d)", (state.topic or "") + " " + (state.description or ""))
                 if _ym and int(_ym.group(1)) >= _year:
                     _year = int(_ym.group(1))
                 state.article_year = _year
