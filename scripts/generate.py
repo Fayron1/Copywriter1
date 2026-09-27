@@ -1226,7 +1226,7 @@ def main():
     # Pipeline
     from agents.pipeline import Pipeline
     pipe = Pipeline(
-        openai_api_key=api_key,
+        openai_api_key=os.getenv("OPENAI_API_KEY", ""),
         qdrant_client=qdrant_client,
     )
 
