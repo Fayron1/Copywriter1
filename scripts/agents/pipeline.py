@@ -1415,6 +1415,29 @@ class Pipeline:
         if chunks:
             rag_block = format_rag_context(chunks, max_chars=4000)
 
+        # НАЛОГОВЫЙ КАЛЬКУЛЯТОР (детерминированные расчёты): для тем со сравнением
+        # режимов/НДС Heart получает готовую таблицу с формулами и ОБЯЗАН использовать
+        # её дословно. LLM не считает налоги самостоятельно (разбор 4.5/10).
+        calc_block = ""
+        try:
+            import re as _re
+            topic_l = (state.topic or "").lower()
+            _calc_triggers = ["усн", "осно", "ндс", "сравни", "выбор режима", "переход",
+                              "точка", "выгоднее", "нагрузк", "юнит", "экономика"]
+            if any(t in topic_l for t in _calc_triggers) and self._is_strict_topic(state.topic, state.description):
+                from .tax_calculator import calc_comparison, format_for_heart
+                # Входные данные: из темы/ТЗ или дефолтный кейс (120 млн, закупки 78 млн)
+                rev_m = _re.search(r'(\d{2,4})\s*(?:млн)', topic_l + " " + (state.description or "").lower())
+                revenue = int(rev_m.group(1)) * 1_000_000 if rev_m else 120_000_000
+                calc_results = calc_comparison(
+                    revenue=revenue, purchases=revenue * 0.65,
+                    includes_vat=False, legal_form="IP", usn_object="income")
+                calc_block = format_for_heart(calc_results) + "\n\n"
+                logger.info("   🧮 Налоговый калькулятор: 4 сценария рассчитаны, "
+                            "таблица передана Heart")
+        except Exception as e:
+            logger.warning(f"   ⚠️ Налоговый калькулятор пропущен: {e}")
+
         # ЗАФИКСИРОВАННЫЕ ПАРАМЕТРЫ (год x норма) — закон для писателя:
         # старее года статьи значения запрещены, отклонение = брак.
         _params = getattr(state, "norm_params", None)
@@ -1436,6 +1459,9 @@ class Pipeline:
             for idx, c in enumerate(style_chunks[:3], 1):
                 anchors.append(f"Образец {idx}:\n{c['text']}")
             rag_block += "\n\n=== РЕАЛЬНЫЕ ОБРАЗЦЫ ПРЕМИАЛЬНОГО B2B СТИЛЯ (ДЛЯ КОПИРОВАНИЯ ИНТОНАЦИИ) ===\n" + "\n".join(anchors)
+
+        # Калькулятор идёт В НАЧАЛО контекста (приоритет над всем)
+        rag_block = calc_block + rag_block
 
         # Автоподбор модели для черновика
         suggested = self._suggest_draft_model(state.topic, state.article_type, state.description)
