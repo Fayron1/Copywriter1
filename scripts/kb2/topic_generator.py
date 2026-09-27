@@ -165,10 +165,18 @@ def demand_hits(query: str) -> int:
     """Число подсказок Яндекса, пересекающихся с темой (proxy спроса)."""
     try:
         import requests as rq
-        core = "+".join(query.split()[:3])
-        r = rq.get(f"https://suggest.yandex.ru/suggest-ff?part={core}&utf=1", timeout=10,
-                   headers={"User-Agent": "Mozilla/5.0"})
-        data = r.json()
+        import urllib.parse
+        core = urllib.parse.quote(" ".join(query.split()[:3]))
+        # Точный профиль curl-запроса: Yandex suggest капризен к заголовкам клиентов
+        r = rq.get(
+            f"https://suggest.yandex.ru/suggest-ff?part={core}&utf=1",
+            timeout=10,
+            headers={"User-Agent": "curl/8.5.0", "Accept": "*/*"},
+        )
+        text = r.text.strip()
+        if not text.startswith("["):
+            return -1
+        data = json.loads(text)
         suggs = data[1] if len(data) > 1 else []
         words = set(re.findall(r"[а-яё]{4,}", query.lower()))
         hits = 0
