@@ -20,6 +20,7 @@ from typing import List, Dict, Any, Set, Optional
 from .config import (
     QDRANT_HOST, QDRANT_PORT, QDRANT_API_KEY,
     COLLECTION_NAME, EMBEDDING_MODEL, EMBEDDING_DIM,
+    EMBEDDING_PROVIDER, LOCAL_EMBEDDING_MODEL,
     OPENAI_API_KEY, EMBEDDING_BATCH_SIZE, QDRANT_BATCH_SIZE,
     API_DELAY, AGENT_MAP, MAX_RETRIES, RETRY_DELAYS,
     CHECKPOINT_DIR,
@@ -27,6 +28,29 @@ from .config import (
 from .classifier import BudgetExhaustedError
 
 logger = logging.getLogger("kb.loader")
+
+
+# ============================================================
+# Провайдер эмбеддингов: local (по умолчанию) | openai
+# ============================================================
+
+def _get_local_embeddings():
+    """Импорт локальной системы (scripts/embedding_system)."""
+    import sys
+    from pathlib import Path
+    scripts_dir = Path(__file__).parent.parent
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    from embedding_system.local_embeddings import embed as _embed, get_dim
+    return _embed, get_dim
+
+
+def get_embedding_dim() -> int:
+    """Размерность вектора активного провайдера."""
+    if EMBEDDING_PROVIDER == "local":
+        _, get_dim = _get_local_embeddings()
+        return get_dim()
+    return EMBEDDING_DIM
 
 
 # ============================================================
@@ -60,36 +84,69 @@ def get_qdrant():
 
 
 def ensure_collection(client) -> None:
-    """Создать коллекцию если не существует"""
+    """Создать коллекцию если не существует.
+
+    Защита от несовпадения размерности: у локальной модели dim=768,
+    у OpenAI text-embedding-3-large — 3072. Смешивать в одной коллекции
+    нельзя (поиск молча деградирует), поэтому при расхождении — ясная
+    ошибка с инструкцией (пересборка в новую коллекцию).
+    """
     from qdrant_client.models import VectorParams, Distance, CollectionStatus
+
+    needed_dim = get_embedding_dim()
 
     try:
         info = client.get_collection(COLLECTION_NAME)
         if info.status == CollectionStatus.GREEN:
+            existing_dim = (
+                info.config.params.vectors.size
+                if hasattr(info.config.params.vectors, "size") else None
+            )
+            if existing_dim and int(existing_dim) != needed_dim:
+                raise RuntimeError(
+                    f"Коллекция '{COLLECTION_NAME}' имеет dim={existing_dim}, "
+                    f"а текущий провайдер ({EMBEDDING_PROVIDER}) даёт dim={needed_dim}. "
+                    f"Пересобери базу в новую коллекцию: задай в .env "
+                    f"KB_COLLECTION_NAME={COLLECTION_NAME}_v2 (или удали старую), "
+                    f"затем python -m copywriter_kb.main --agent all --fresh"
+                )
             logger.info(f"✅ Коллекция '{COLLECTION_NAME}' существует ({info.points_count} точек)")
             return
+    except RuntimeError:
+        raise
     except Exception:
         pass
 
     client.create_collection(
         collection_name=COLLECTION_NAME,
         vectors_config=VectorParams(
-            size=EMBEDDING_DIM,
+            size=needed_dim,
             distance=Distance.COSINE,
         ),
     )
-    logger.info(f"📦 Создана коллекция '{COLLECTION_NAME}' (dim={EMBEDDING_DIM}, model={EMBEDDING_MODEL})")
+    logger.info(f"📦 Создана коллекция '{COLLECTION_NAME}' "
+                f"(dim={needed_dim}, provider={EMBEDDING_PROVIDER})")
 
 
 # ============================================================
 # Embeddings (батчевый)
 # ============================================================
 
-def get_embeddings_batch(texts: List[str]) -> List[List[float]]:
+def get_embeddings_batch(texts: List[str], input_type: str = "passage") -> List[List[float]]:
     """
-    Получить embeddings для списка текстов (батчевый запрос).
-    Включает retry при ошибках API.
+    Получить embeddings для списка текстов (батчево).
+
+    input_type: "passage" — заливка документов (префикс E5 "passage: "),
+                "query"   — поисковый запрос (префикс "query: ").
+
+    Провайдер: EMBEDDING_PROVIDER из конфига:
+      local  — локальная модель (scripts/embedding_system), без API-ключей;
+      openai — платный API (retry при ошибках, контроль баланса).
     """
+    if EMBEDDING_PROVIDER == "local":
+        _embed, _ = _get_local_embeddings()
+        return _embed(texts, input_type=input_type)
+
     trimmed = [t[:20000] for t in texts]
 
     for attempt in range(MAX_RETRIES):
@@ -265,19 +322,20 @@ def upload_chunks(
 
         # Батчевый embedding
         try:
-            embeddings = get_embeddings_batch(embed_texts)
+            embeddings = get_embeddings_batch(embed_texts, input_type="passage")
         except Exception as e:
             logger.error(f"❌ Ошибка батчевого embedding: {e}")
             # Фолбэк: по одному
             embeddings = []
             for text in embed_texts:
                 try:
-                    emb = get_embeddings_batch([text])
+                    emb = get_embeddings_batch([text], input_type="passage")
                     embeddings.extend(emb)
                 except Exception as e2:
                     logger.warning(f"⚠️ Пропуск чанка: {e2}")
-                    embeddings.append([0.0] * EMBEDDING_DIM)
-                time.sleep(API_DELAY)
+                    embeddings.append([0.0] * get_embedding_dim())
+                if EMBEDDING_PROVIDER != "local":
+                    time.sleep(API_DELAY)
 
         # Формируем точки
         points = []

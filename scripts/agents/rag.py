@@ -52,9 +52,9 @@ def query_knowledge(
     # Любой сбой ниже (embedding, построение фильтров, запрос) не должен ронять
     # пайплайн: при ошибке тихо возвращаем пустой контекст.
     try:
-        # Embedding запроса
+        # Embedding запроса (input_type="query": префикс E5 для поисковых запросов)
         from copywriter_kb.loader import get_embeddings_batch
-        embeddings = get_embeddings_batch([query_text])
+        embeddings = get_embeddings_batch([query_text], input_type="query")
         if not embeddings or embeddings[0] is None:
             logger.warning(f"RAG [{agent_id}]: не удалось получить embedding запроса — пропускаем RAG")
             return []
