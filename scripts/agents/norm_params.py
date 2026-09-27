@@ -467,6 +467,11 @@ def lint_form_deadline(text: str, params_field=None) -> List[str]:
     return issues
 
 
+_STAT_WITHOUT_SRC = re.compile(
+    r"(?:около|примерно|порядка|свыше|более)?\s*(\d{2,3})\s*%\s*(?:всех|ограничений|случаев|компаний|бизнес|организаций|предпринимател)", re.I)
+_INCOMPLETE_CITATION = re.compile(
+    r"(?:Приказ|Письмо|Постановление)\s*[№N]?\s*\d+[^\d]{0,5}(?:от\s*[\d.]+)?(?!\s*(?:\.|—|–)\s*(?:ФНС|Минфин|Росфинмониторинг|Правительства|Банка\s*России))", re.I)
+
 _PLACEHOLDER_PATTERNS = [
     (re.compile(r"стать[уяе]\s+от\s+(?:(?:КоАП|НК|ГК|ТК)|$|\.)", re.I), "заглушка «статья от»"),
     (re.compile(r"ст\.\s*от\s+", re.I), "заглушка «ст. от»"),
@@ -515,6 +520,15 @@ def lint_legal(text: str) -> List[str]:
         frag = text[max(0, m.start() - 30):m.end() + 20].replace("\n", " ")
         issues.append(f"🟡 ЦЕНА БЕЗ ИСТОЧНИКА: «{frag}» — рыночная оценка без источника; "
                       f"уберите цифру или маркируйте как условную")
+    # Неподтверждённая статистика (кейс: «80% всех ограничений» — 2026-09-27)
+    for m in list(_STAT_WITHOUT_SRC.finditer(text))[:2]:
+        frag = text[max(0, m.start() - 20):m.end() + 30].replace("\n", " ")
+        issues.append(f"🔴 СТАТИСТИКА БЕЗ ИСТОЧНИКА: «{frag}» — процент без названия "
+                      f"исследования/ведомства. Уберите цифру или дайте источник.")
+    # Неполные ссылки на нормативные акты (кейс: «Приказ №23» без ведомства — 2026-09-27)
+    for m in list(_INCOMPLETE_CITATION.finditer(text))[:2]:
+        frag = text[max(0, m.start() - 10):m.end() + 30].replace("\n", " ")
+        issues.append(f"🟡 НЕПОЛНАЯ ССЫЛКА: «{frag}» — укажите ведомство, дату и название акта")
     for m in list(_FORM_RE.finditer(text))[:3]:
         window = text[max(0, m.start() - 80):m.end() + 80].lower()
         if "актуальн" not in window and "проверьт" not in window:
