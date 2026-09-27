@@ -773,6 +773,14 @@ class Pipeline:
                         for issue in lint_form_deadline(state.final_article or "", _np):
                             validation_warnings.append(issue)
                             logger.warning(f"   {issue}")
+                        # Детектор обрыва текста (кейс: «Шаг пятый — если решение делегировано аутсорс»)
+                        try:
+                            from .norm_params import detect_truncation
+                            for issue in detect_truncation(state.final_article or ""):
+                                validation_warnings.append(issue)
+                                logger.warning(f"   {issue}")
+                        except Exception:
+                            pass
                     except Exception as e:
                         logger.warning(f"   ⚠️ Петля параметров пропущена: {e}")
 

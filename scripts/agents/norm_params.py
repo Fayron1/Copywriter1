@@ -288,13 +288,25 @@ def enforce_params(text: str, params_field) -> tuple:
         for num, unit in _num_unit_pairs(p.get("old_value", "")):
             if num in cur_nums:
                 continue
-            # Заменяем все вхождения «старое число+единица» на действующее значение
             cur_val = p.get("value", "")
             cur_first = cur_val.split()[0] if cur_val else ""
             for needle in (f"{num}{unit}", f"{num} {unit}", f"{num}\u00a0{unit}"):
                 if needle in text:
                     text = text.replace(needle, cur_first)
                     fixes.append(f"{needle} → {cur_first} ({p.get('name','?')})")
+    # Детерминированное удаление псевдо-экспертности (Heart не убирает из промпта)
+    _PSEUDO = [
+        ("на моей практике как", "при аудите подобных систем"),
+        ("на моей практике", "в практике отрасли"),
+        ("в моей практике", "в практике отрасли"),
+        ("я сопровождал", "специалисты сопровождали"),
+        ("мы защищали", "специалисты защищали"),
+    ]
+    for old, new in _PSEUDO:
+        if old in text.lower():
+            import re as _re
+            text = _re.sub(_re.escape(old), new, text, flags=_re.IGNORECASE)
+            fixes.append(f"псевдо-эксперт: «{old}» → «{new}»")
     return text, fixes
 
 
@@ -484,6 +496,51 @@ _PSEUDO_EXPERT = [
 ]
 _UNVERIFIED_COST = re.compile(
     r"(?:обходится|стоит|стоит порядка|составляет|потребует|выйдет)\s*(?:в|от|порядка)?\s*[\d\s]{3,}\s*(?:тыс|млн|руб|₽| тысяч| миллионов| рублей)", re.I)
+
+
+def detect_truncation(text: str) -> List[str]:
+    """Детектор обрыва статьи: последний содержательный раздел кончается посреди
+    предложения или без завершения мысли. Кейс: «Шаг пятый — если решение делегировано
+    аутсорс» (2026-09-27) — hard-cut обрезал текст, потом приклеился блок Источники."""
+    issues = []
+    if not text or len(text) < 200:
+        return issues
+    # Найти последний содержательный блок перед Источниками/Примечаниями
+    body = text
+    for tail_marker in ["\n## Источники", "\n## Примечания", "\n## Ссылки", "\n---"]:
+        idx = body.rfind(tail_marker)
+        if idx > len(body) * 0.5:
+            body = body[:idx]
+            break
+    body = body.rstrip()
+    if not body:
+        return issues
+    # Последние 100 символов тела
+    tail = body[-100:]
+    # Признаки обрыва:
+    # 1. Нет завершающего знака препинания
+    last_char = body[-1] if body else ''
+    if last_char not in '.!?…»"\'\n)':
+        issues.append(f"🔴 ОБРЫВ ТЕКСТА: статья кончается на «…{tail[-60:]}» — "
+                      f"нет завершения мысли (последний символ: «{last_char}»)")
+    # 2. Слова-маркеры незавершённости в последних 80 символах
+    truncation_words = ['аутсорс', 'далее', 'продолжение', 'шаг', 'во-первых']
+    for w in truncation_words:
+        if w in tail.lower() and not tail.rstrip().endswith(('.', '!', '?', '…')):
+            issues.append(f"🔴 ОБРЫВ НА «{w}»: текст обрезан в незавершённом блоке")
+            break
+    # 3. Последний H2-раздел слишком короткий (< 50 символов тела)
+    import re as _re
+    sections = _re.split(r'^##\s', body, flags=_re.MULTILINE)
+    if len(sections) > 1:
+        last_sec = sections[-1]
+        # Убираем заголовок
+        lines = last_sec.split('\n', 1)
+        sec_body = lines[1].strip() if len(lines) > 1 else ''
+        if sec_body and len(sec_body) < 50:
+            issues.append(f"🔴 ПОСЛЕДНИЙ РАЗДЕЛ ПУСТ: «{lines[0][:50]}» — "
+                          f"только {len(sec_body)} символов тела")
+    return issues
 
 
 def lint_legal(text: str) -> List[str]:
