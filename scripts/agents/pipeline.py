@@ -858,12 +858,38 @@ class Pipeline:
             except Exception as e:
                 logger.warning(f"      ⚠️ Ошибка при выполнении резервного веб-поиска: {e}")
 
+        # ВНЕШНИЙ НОРМАТИВНЫЙ БРИФИНГ (Vane/Яндекс): закрывает дыру «нормы нет в БЗ» —
+        # подчинённые акты (постановления, положения) и письма ведомств ищутся в вебе
+        # и приходят факт-чекеру как secondary-источники с URL. Сбой не ломает шаг.
+        vane_norm_block = ""
+        try:
+            from .vane import research as vane_research
+            vr = vane_research(
+                f"{state.topic}: точные нормы — статьи НК/ТК/ГК, постановления Правительства "
+                f"(номер, дата, пункт), письма Минфина и ФНС, лимиты и даты на 2026 год")
+            if vr.get("message"):
+                src_lines = "\n".join(
+                    f"- {(s.get('title') or '')[:80]}: {s.get('url', '')}"
+                    for s in vr.get("sources", [])[:6] if s.get("url")
+                )
+                vane_norm_block = (
+                    "\n\n=== ВНЕШНИЙ БРИФИНГ (метапоиск; [N] — источник) ===\n"
+                    + vr["message"][:3000]
+                    + (("\n--- источники ---\n" + src_lines) if src_lines else "")
+                    + "\n=== КОНЕЦ БРИФИНГА ==="
+                )
+                logger.info(f"      ✅ Vane-брифинг норм получен ({len(vr.get('sources', []))} источников)")
+        except Exception as e:
+            logger.warning(f"      ⚠️ Vane-брифинг норм недоступен: {e}")
+
         user_msg = (
             f"Задание от Оркестратора: {task}\n"
             f"Тема: {state.topic}\n"
             f"Направление: {state.direction}\n\n"
-            f"{rag_context}\n\n"
-            f"Найди и структурируй все релевантные факты."
+            f"{rag_context}\n"
+            f"{vane_norm_block}\n\n"
+            f"Найди и структурируй все релевантные факты. Нормы из брифинга, отсутствующие "
+            f"в чанках БЗ, помечай как secondary с URL (см. правило ВНЕШНИЙ БРИФИНГ)."
         )
         state.facts = self._call_agent("fact_finder", user_msg, state=state)
 
