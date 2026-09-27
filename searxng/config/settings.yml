@@ -1,6 +1,10 @@
 # Настройки SearXNG для Антигравити Копирайтера
-
-use_default_settings: true
+# Движки: только работающие с российского VPS IP (западные капчуются).
+use_default_settings:
+  engines:
+    keep_only:
+      - yandex
+      - wikipedia
 
 server:
   port: 8080
@@ -12,7 +16,10 @@ search:
     - html
     - json
 
-# Отключаем ограничение по rate limit для локальных запросов
+engines:
+  - name: yandex
+    disabled: false
+
 outgoing:
   request_timeout: 5.0
   max_request_timeout: 10.0
