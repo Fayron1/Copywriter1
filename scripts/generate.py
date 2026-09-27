@@ -1066,7 +1066,12 @@ def save_result(state, output_dir: Path):
         passport_lines.append(f"  {w}")
     for w in yellow[:10]:
         passport_lines.append(f"  {w}")
-    passport_lines.append(f"PUBLISH_ALLOWED: {'ДА' if publish_allowed else 'НЕТ — требуется правка/юрпроверка'}")
+    if publish_allowed:
+        passport_lines.append(f"PUBLISH_ALLOWED: ДА")
+    else:
+        passport_lines.append("PUBLISH_ALLOWED: НЕТ — требуется правка/юрпроверка")
+        passport_lines.append("publication_status: REVISE | maximum_score: 6/10 "
+                              "(жёсткое ограничение: критические ошибки блокируют высокий балл)")
 
     passport_lines.append("============================================================")
     passport_path = output_dir / "passport.txt"
