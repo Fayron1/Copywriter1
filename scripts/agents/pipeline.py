@@ -714,6 +714,31 @@ class Pipeline:
 
                 # Финальная валидация (без API)
                 validation_warnings = self._validate_final(state)
+
+                # ПРИНУДИТЕЛЬНАЯ ПЕТЛЯ параметров: модель дрейфует к приорам на длинных
+                # генерациях («20%» вместо «22%» при таблице перед глазами — кейс 2026-09-27).
+                # 1) Детерминированная замена устаревших чисел на действующие.
+                # 2) LLM-сверка качественных правил матрицы (даты/сроки/порядок).
+                # Замены применяются к тексту; несоответствия — в publish-gate.
+                _np = getattr(state, "norm_params", None)
+                if _np:
+                    try:
+                        from .norm_params import enforce_params, check_matrix_compliance
+                        fixed_text, fixes = enforce_params(state.final_article or "", _np)
+                        if fixes:
+                            state.final_article = fixed_text
+                            state.draft = fixed_text
+                            logger.info(f"   🔧 ПРИНУДИТЕЛЬНЫЕ ЗАМЕНЫ параметров: {len(fixes)}")
+                            for f in fixes[:8]:
+                                logger.info(f"      • {f}")
+                            validation_warnings.append(
+                                f"🟡 Автозамены устаревших значений: {'; '.join(fixes[:5])}")
+                        for issue in check_matrix_compliance(state.final_article or "", _np):
+                            validation_warnings.append(issue)
+                            logger.warning(f"   {issue}")
+                    except Exception as e:
+                        logger.warning(f"   ⚠️ Петля параметров пропущена: {e}")
+
                 # Сохраняем для publish-gate в паспорте статьи (generate.py)
                 state.final_warnings = validation_warnings
                 for w in validation_warnings:

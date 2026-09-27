@@ -57,8 +57,14 @@ def get_norm_params(topic: str, year: int) -> List[Dict[str, Any]]:
         vr = vane_research(
             f"Официальные разъяснения ФНС и НК РФ, ДЕЙСТВУЮЩИЕ на {year} год: {topic}. "
             f"Только актуальные на {year} год значения: пороги, ставки, лимиты, даты вступления, "
-            f"порядки перехода, ТОЧНЫЕ суммы взносов. Значения прошлых лет помечай как устаревшие. "
+            f"порядки перехода, ТОЧНЫЕ суммы взносов. ОБЯЗАТЕЛЬНО включи ставки и пороги ВСЕХ "
+            f"режимов, в которые читатель может попасть из темы статьи (ОСНО: ставка НДС, шкала "
+            f"НДФЛ; УСН: лимиты; взносы ИП — фиксированная часть и срок уплаты 1% с превышения). "
+            f"Для каждого параметра, менявшегося с прошлого года, укажи старое значение "
+            f"(например НДС: было 20%, с 2026 — 22%). "
+            f"Значения прошлых лет помечай как устаревшие. "
             f"Разделяй сценарии для физлица без ИП и для ИП. "
+            f"ЗАКОНОПРОЕКТЫ и непринятые поправки ИСКЛЮЧАЙ полностью — только действующие нормы."
             f"Приоритет: nalog.gov.ru, garant.ru, consultant.ru.")
         briefing = (vr.get("message") or "").strip()
         if not briefing:
@@ -235,6 +241,79 @@ def check_draft(draft: str, params_field) -> List[str]:
     issues.extend(missing[:3])
     issues.extend(lint_legal(text))
     return issues
+
+
+def enforce_params(text: str, params_field) -> tuple:
+    """
+    Принудительная петля: детерминированная замена устаревших чисел на действующие.
+    Возвращает (исправленный_текст, список_замен). Затрагивает ТОЛЬКО числовые
+    значения из чёрного списка (old_value), которых нет среди действующих.
+    """
+    if not text:
+        return text, []
+    params, _ = _unwrap(params_field)
+    fixes = []
+    for p in params:
+        cur_nums = {n for n, _ in _num_unit_pairs(p.get("value", ""))}
+        for num, unit in _num_unit_pairs(p.get("old_value", "")):
+            if num in cur_nums:
+                continue
+            # Заменяем все вхождения «старое число+единица» на действующее значение
+            cur_val = p.get("value", "")
+            cur_first = cur_val.split()[0] if cur_val else ""
+            for needle in (f"{num}{unit}", f"{num} {unit}", f"{num}\u00a0{unit}"):
+                if needle in text:
+                    text = text.replace(needle, cur_first)
+                    fixes.append(f"{needle} → {cur_first} ({p.get('name','?')})")
+    return text, fixes
+
+
+def check_matrix_compliance(draft: str, params_field) -> List[str]:
+    """LLM-сверка качественных правил матрицы (даты, сроки, порядок) с текстом.
+    Детерминированный чек ловит только числа; «с месяца» vs «с даты превышения»
+    ловится здесь. Один дешёвый вызов DeepSeek."""
+    _, scenarios = _unwrap(params_field)
+    if not scenarios or not draft:
+        return []
+    try:
+        from openai import OpenAI
+        client = OpenAI(
+            api_key=os.getenv("DEEPSEEK_API_KEY", ""),
+            base_url=os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com/v1"),
+            timeout=90.0,
+        )
+        scen_text = "\n".join(
+            f"{i}. {s.get('status_before','?')} | событие: {s.get('event','?')} | "
+            f"дата последствий: {s.get('effect_date','?')} | действие: {s.get('action','?')} | "
+            f"срок: {s.get('deadline','?')} | режим после: {s.get('regime_after','?')}"
+            for i, s in enumerate(scenarios, 1))
+        system = (
+            "Ты юридический валидатор. Сверь текст статьи со сценарной матрицей. "
+            "Найди ТОЛЬКО противоречия качественных правил: неверные даты последствий "
+            "(например «с месяца» вместо «с даты превышения»), неверные сроки, неверный порядок, "
+            "смешение статусов/режимов из разных строк. НЕ оценивай стиль. "
+            "Верни JSON: {\"issues\": [{\"quote\": \"фраза из текста\", "
+            "\"matrix_rule\": \"правило из матрицы\", \"severity\": \"critical|warning\"}]}. "
+            "Пустой issues, если противоречий нет."
+        )
+        resp = client.chat.completions.create(
+            model=os.getenv("MODEL_DEEPSEEK_FLASH", "deepseek-v4-flash"),
+            messages=[{"role": "system", "content": system},
+                      {"role": "user", "content": f"МАТРИЦА:\n{scen_text}\n\nТЕКСТ:\n{draft[:12000]}"}],
+            response_format={"type": "json_object"},
+            temperature=0.0, timeout=90.0)
+        data = json.loads(resp.choices[0].message.content)
+        issues = []
+        for it in (data.get("issues") or [])[:6]:
+            if not isinstance(it, dict):
+                continue
+            mark = "🔴" if str(it.get("severity")) == "critical" else "🟡"
+            issues.append(f"{mark} ПРОТИВОРЕЧИЕ МАТРИЦЕ: «{(it.get('quote') or '')[:80]}» — "
+                          f"по матрице: {(it.get('matrix_rule') or '')[:100]}")
+        return issues
+    except Exception as e:
+        logger.warning(f"matrix compliance сбой: {e}")
+        return []
 
 
 # ============================================================
