@@ -77,6 +77,61 @@ def get_norm_params(topic: str, year: int) -> List[Dict[str, Any]]:
         return []
 
 
+# ============================================================
+# Правила для будущих лет: проектные значения НЕ подаются как факт
+# ============================================================
+
+# Ожидаемые изменения на 2027 (из разъяснений ФНС 2026) — для валидации паспортов,
+# построенных на 2027-м. Если паспорт на 2027 содержит значение 2026 года — 🔴.
+KNOWN_FUTURE_RULES = {
+    2027: {
+        "usn_vat_exemption_threshold": {
+            "current_2026": "20 000 000",
+            "expected_2027": "15 000 000",
+            "note": "порог освобождения от НДС на УСН снижается поэтапно: 2027 — 15 млн, 2028 — 10 млн",
+        },
+    },
+}
+
+_QUARTER_VS_MONTH = [
+    (re.compile(r"утрат\w+[^.]{0,60}(?:с\s+)?начал[ао]\s+квартала", re.I),
+     "«с начала квартала» — неверно: утрата права на УСН наступает с 1-го числа месяца "
+     "превышения (ст. 346.13 НК РФ)"),
+    (re.compile(r"переход\w+\s+на\s+ОСНО[^.]{0,60}(?:с\s+)?начал[ао]\s+квартала", re.I),
+     "«переход на ОСНО с начала квартала» — неверно: с 1-го числа месяца превышения"),
+]
+
+
+def lint_year_rules(text: str, year: int, params_field) -> List[str]:
+    """Проверка годовой согласованности паспорта + квартал-vs-месяц + проектные дефляторы."""
+    issues = []
+    params, _ = _unwrap(params_field)
+    if year in KNOWN_FUTURE_RULES:
+        for rule_key, rule in KNOWN_FUTURE_RULES[year].items():
+            cur_val_num = re.search(r"(\d[\d\s]*)\s*(?:млн|₽)", rule["current_2026"])
+            if cur_val_num and cur_val_num.group(1).replace(" ", "") in text:
+                # Текст содержит значение 2026 года для темы, посвящённой {year}
+                # — не блокируем (значение могло быть историческим контекстом),
+                # но если ОНО подаётся как действующее на {year} — критично.
+                # Проверяем по паспорту: если паспорт на {year} не содержит expected — warning
+                all_param_values = " ".join(p.get("value", "") for p in params)
+                if rule["expected_2027"][:3] not in all_param_values.replace(" ", ""):
+                    issues.append(
+                        f"🔴 ПАСПОРТ {year}: параметр «{rule_key}» — в паспорте нет значения "
+                        f"{rule['expected_2027']} (действует {rule['current_2026']} только в 2026). "
+                        f"Для {year} года — {rule['note']}.")
+    # Квартал vs месяц
+    for pat, msg in _QUARTER_VS_MONTH:
+        if pat.search(text):
+            issues.append(f"🔴 {msg}")
+    # Проектный дефлятор как факт
+    if re.search(r"дефлятор\w*[^.]{0,40}1,15", text, re.I):
+        issues.append(
+            "🟡 ДЕФЛЯТОР 1,15 — проектное значение, не утверждён приказом Минэкономразвития. "
+            "Маркируй как «прогноз» или «стресс-сценарий», не как действующий лимит.")
+    return issues
+
+
 def _extract_params(briefing: str, src_line: str, year: int) -> List[Dict[str, Any]]:
     """LLM-структуризация брифинга в параметры + сценарии (DeepSeek flash)."""
     try:

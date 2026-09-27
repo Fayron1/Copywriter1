@@ -725,7 +725,7 @@ class Pipeline:
                     try:
                         from .norm_params import (enforce_params, check_matrix_compliance,
                                                   fix_matrix_violations, fix_markdown_tables,
-                                                  lint_form_deadline)
+                                                  lint_form_deadline, lint_year_rules)
                         # 0. Исправление Markdown-таблиц (Heart пишет | — | вместо | --- |)
                         tbl_text, tbl_fixes = fix_markdown_tables(state.final_article or "")
                         if tbl_fixes:
@@ -771,6 +771,11 @@ class Pipeline:
                                 logger.warning(f"   {issue}")
                         # Форма/срок/ПСН-линтер (правила от редактора 2026-09-27)
                         for issue in lint_form_deadline(state.final_article or "", _np):
+                            validation_warnings.append(issue)
+                            logger.warning(f"   {issue}")
+                        # Годовые правила: паспорт на год статьи, квартал-vs-месяц, проектные дефляторы
+                        for issue in lint_year_rules(state.final_article or "",
+                                                     getattr(state, "article_year", 2026), _np):
                             validation_warnings.append(issue)
                             logger.warning(f"   {issue}")
                         # Детектор обрыва текста (кейс: «Шаг пятый — если решение делегировано аутсорс»)
@@ -976,11 +981,17 @@ class Pipeline:
             try:
                 import datetime
                 from .norm_params import get_norm_params
+                # Целевой год статьи: «в 2027», «с 2027» и т.п. в теме/ТЗ — паспорт на этот год.
+                # Иначе текущий год. (Кейс: статья про 2027 с паспортом 2026 -> порог 20 вместо 15 млн.)
+                _year = datetime.datetime.now().year
+                _ym = _re.search(r"(20[2-9]\d)", (state.topic or "") + " " + (state.description or ""))
+                if _ym and int(_ym.group(1)) >= _year:
+                    _year = int(_ym.group(1))
+                state.article_year = _year
                 state.norm_params = get_norm_params(
-                    state.topic, datetime.datetime.now().year)
+                    state.topic, _year)
                 if state.norm_params:
-                    logger.info(f"   📌 Паспорт параметров: {len(state.norm_params)} "
-                                f"действующих значений зафиксировано")
+                    logger.info(f"   📌 Паспорт параметров на {_year} год зафиксирован")
             except Exception as e:
                 logger.warning(f"   ⚠️ Паспорт параметров пропущен: {e}")
 

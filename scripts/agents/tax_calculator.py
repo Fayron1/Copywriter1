@@ -83,6 +83,7 @@ class ScenarioResult:
     vat_rate: float = 0.0
     # Налог режима
     usn_tax: float = 0.0
+    usn_after_reduction: float = 0.0
     profit_or_ndfl_tax: float = 0.0
     profit_base: float = 0.0
     insurance: float = 0.0
@@ -179,18 +180,36 @@ def calc_scenario(inp: ScenarioInput) -> ScenarioResult:
             rate = inp.usn_rate_override or P["usn_income_rate"]
             r.usn_tax = r.revenue_ex_vat * rate
             r.formulas.append(f"УСН 6% = {r.revenue_ex_vat:,.0f} × 0.06 = {r.usn_tax:,.0f} ₽ (до уменьшения на взносы)")
+            # Уменьшение на страховые взносы: без работников — до 100%,
+            # с работниками — не более 50% (п. 3.1 ст. 346.21 НК РФ).
+            ins = P["insurance_fixed"]
+            if r.revenue_ex_vat > P["insurance_1pct_threshold"]:
+                ins += min((r.revenue_ex_vat - P["insurance_1pct_threshold"]) * 0.01, P["insurance_1pct_max"])
+            r.insurance = ins
+            if inp.employees:
+                reduction = min(ins, r.usn_tax * 0.5)
+                r.usn_after_reduction = r.usn_tax - reduction
+                r.formulas.append(f"Уменьшение на взносы (с работниками, max 50%) = min({ins:,.0f}; {r.usn_tax:,.0f} × 50%) = {reduction:,.0f} ₽")
+                r.formulas.append(f"УСН к уплате = {r.usn_tax:,.0f} − {reduction:,.0f} = {r.usn_after_reduction:,.0f} ₽")
+                r.notes.append("С работниками УСН уменьшается на взносы НЕ БОЛЕЕ чем на 50% (п. 3.1 ст. 346.21 НК РФ).")
+            else:
+                reduction = min(ins, r.usn_tax)
+                r.usn_after_reduction = r.usn_tax - reduction
+                r.formulas.append(f"Уменьшение на взносы (без работников, до 100%) = min({ins:,.0f}; {r.usn_tax:,.0f}) = {reduction:,.0f} ₽")
+                r.formulas.append(f"УСН к уплате = {r.usn_tax:,.0f} − {reduction:,.0f} = {r.usn_after_reduction:,.0f} ₽")
+                r.notes.append("Без работников УСН уменьшается на взносы до 100%.")
         else:
             rate = inp.usn_rate_override or P["usn_income_expense_rate"]
             base = max(0, r.revenue_ex_vat - r.purchases_ex_vat)
             r.usn_tax = base * rate
             r.profit_base = base
             r.formulas.append(f"УСН 15% = ({r.revenue_ex_vat:,.0f} − {r.purchases_ex_vat:,.0f}) × 0.15 = {r.usn_tax:,.0f} ₽")
-        # Страховые взносы (упрощённо: фиксированная + 1%, уменьшают УСН до 50%/100%)
-        ins = P["insurance_fixed"]
-        if r.revenue_ex_vat > P["insurance_1pct_threshold"]:
-            ins += min((r.revenue_ex_vat - P["insurance_1pct_threshold"]) * 0.01, P["insurance_1pct_max"])
-        r.insurance = ins
-        r.notes.append(f"Страховые взносы ИП за себя: {ins:,.0f} ₽ (учтены отдельно, уменьшение УСН — упрощённо не применено).")
+            ins = P["insurance_fixed"]
+            if r.revenue_ex_vat > P["insurance_1pct_threshold"]:
+                ins += min((r.revenue_ex_vat - P["insurance_1pct_threshold"]) * 0.01, P["insurance_1pct_max"])
+            r.insurance = ins
+            r.usn_after_reduction = r.usn_tax  # на «доходы-расходы» взносы идут в расходы, не уменьшают налог
+            r.notes.append("УСН «доходы минус расходы»: взносы учитываются в расходах, налог напрямую не уменьшают.")
     elif inp.regime == "OSNO":
         if inp.legal_form == "OOO":
             base = max(0, r.revenue_ex_vat - r.purchases_ex_vat - inp.payroll)
@@ -219,8 +238,11 @@ def calc_scenario(inp: ScenarioInput) -> ScenarioResult:
                 ins += min((r.revenue_ex_vat - P["insurance_1pct_threshold"]) * 0.01, P["insurance_1pct_max"])
             r.insurance = ins
 
-    # ── 4. Совокупная нагрузка ──
-    r.total_burden = r.vat_payable + r.usn_tax + r.profit_or_ndfl_tax
+    # ── 4. Совокупная нагрузка (УСН после уменьшения на взносы) ──
+    usn_final = getattr(r, "usn_after_reduction", None)
+    if usn_final is None:
+        usn_final = r.usn_tax
+    r.total_burden = r.vat_payable + usn_final + r.profit_or_ndfl_tax
     if r.revenue_ex_vat > 0:
         r.effective_rate = r.total_burden / r.revenue_ex_vat
     return r
@@ -277,13 +299,16 @@ def format_for_heart(results: List[ScenarioResult]) -> str:
     lines = ["=== РАСЧЁТ НАЛОГОВОЙ НАГРУЗКИ (детерминированный калькулятор, 2026) ===",
              "ЭТИ ЦИФРЫ — единственный источник расчётов в статье. Используй их дословно,",
              "включая формулы. Пересчитывать самостоятельно ЗАПРЕЩЕНО.", ""]
-    lines.append("| Сценарий | НДС к уплате | Налог режима | Всего нагрузка | Эффективная ставка |")
+    lines.append("| Сценарий | НДС к уплате | УСН/приб. после уменьшения | Всего нагрузка | Эффективная ставка |")
     lines.append("| --- | --- | --- | --- | --- |")
     for r in results:
         if not r.ok:
             lines.append(f"| {r.name} | ошибка: {r.error} | | | |")
             continue
-        tax = f"УСН {r.usn_tax:,.0f} ₽" if r.usn_tax else f"приб./НДФЛ {r.profit_or_ndfl_tax:,.0f} ₽"
+        usn_final = getattr(r, "usn_after_reduction", None)
+        usn_final = usn_final if usn_final is not None else r.usn_tax
+        tax = (f"УСН {usn_final:,.0f} ₽" if r.regime == "USN"
+               else f"приб./НДФЛ {r.profit_or_ndfl_tax:,.0f} ₽")
         lines.append(f"| {r.name} | {r.vat_payable:,.0f} ₽ | {tax} | {r.total_burden:,.0f} ₽ | {r.effective_rate*100:.1f}% |")
 
     lines.append("")
