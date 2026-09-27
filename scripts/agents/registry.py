@@ -142,7 +142,7 @@ AGENTS: Dict[str, AgentConfig] = {
         rag=RagConfig(
             top_k=5,
             filters={"source_type": ["workflow", "reference"]},
-            payload_fields=["text", "source_type", "chunk_type"],
+            payload_fields=["text", "source_file", "source_type", "chunk_type"],
         ),
     ),
 
