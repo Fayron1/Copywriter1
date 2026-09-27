@@ -217,18 +217,66 @@ def save_state(s: Dict[str, str]) -> None:
 
 
 def daily_pravo_check(state: Dict[str, str]) -> None:
-    """Проверка официального портала опубликования. Пока probe-режим:
-    доступность + (если задан PRAVO_DAILY_URL) список документов дня."""
+    """Ежедневная проверка источников. pravo.gov.ru фильтрует зарубежные
+    датацентр-IP (наш VPS) — фиксируем статус один раз, не тревожим владельца.
+    Доступные официальные источники: nalog.gov.ru, consultant.ru, garant.ru,
+    minfin.gov.ru (проверены 2026-09-27)."""
     today = datetime.now().strftime("%Y-%m-%d")
-    lines = [f"📰 Проверка pravo.gov.ru за {today}:"]
-    base = PRAVO_DAILY_URL or "https://publication.pravo.gov.ru/"
-    try:
-        r = requests.get(base, timeout=20, headers={"User-Agent": "kb-update/1.0"})
-        lines.append(f"• портал доступен (HTTP {r.status_code})")
-    except Exception as e:
-        lines.append(f"• портал недоступен: {type(e).__name__}")
-    notify("\n".join(lines))
+    reachable = []
+    for url in ["https://www.consultant.ru/", "https://www.garant.ru/",
+                "https://minfin.gov.ru/", "https://www.nalog.gov.ru/"]:
+        try:
+            r = requests.head(url, timeout=10, headers={"User-Agent": "kb-update/1.0"},
+                              allow_redirects=True)
+            if r.status_code < 500:
+                reachable.append(url.split("/")[2])
+        except Exception:
+            pass
+    logger.info(f"[sources] доступны: {reachable or 'НИЧЕГО'}")
+    if not reachable and state.get("sources_alert") != today:
+        notify("⚠️ Ни один правовой источник не отвечает с VPS — проверь сеть.")
+        state["sources_alert"] = today
     state["pravo_last_check"] = today
+    save_state(state)
+
+
+# Мониторимые документы для наблюдателя поправок (через Vane/Яндекс)
+AMENDMENT_WATCH_DOCS = ["НК РФ", "ТК РФ", "ГК РФ", "КоАП РФ", "152-ФЗ персональные данные"]
+AMENDMENT_WATCH_ENABLED = os.getenv("AMENDMENT_WATCH", "1").strip().lower() not in ("0", "false", "no")
+
+
+def daily_amendment_watch(state: Dict[str, str]) -> None:
+    """Наблюдатель поправок: Vane (Яндекс-метапоиск + синтез с цитатами) по каждому
+    мониторимому документу. Уведомляем ТОЛЬКО при находках с датами текущего/будущего
+    месяца. Тишина = всё спокойно (еженедельного дайджеста нет — меньше шума)."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    month_name = ["январь", "февраль", "март", "апрель", "май", "июнь", "июль",
+                  "август", "сентябрь", "октябрь", "ноябрь", "декабрь"][datetime.now().month - 1]
+    findings = []
+    try:
+        sys.path.insert(0, str(SCRIPTS))
+        from agents.vane import research as vane_research
+        for doc in AMENDMENT_WATCH_DOCS:
+            try:
+                res = vane_research(
+                    f"Приняты ли новые поправки в {doc} в {month_name} {datetime.now().year} года? "
+                    f"Только свежие изменения с датами и номерами законов.")
+                msg = (res.get("message") or "").strip()
+                # Эвристика свежести: месяц/год или фразы о принятии
+                fresh = (month_name in msg.lower()
+                         or f"{datetime.now().year}" in msg)
+                if msg and fresh and "не удалось" not in msg[:60]:
+                    findings.append(f"📄 {doc}:\n{msg[:700]}")
+            except Exception as e:
+                logger.warning(f"[watch] {doc}: {e}")
+    except ImportError:
+        logger.warning("[watch] agents.vane недоступен — наблюдатель пропущен")
+
+    if findings:
+        notify("🔔 Наблюдатель законодательства: возможные свежие поправки.\n\n"
+               + "\n\n".join(findings)[:3500]
+               + "\n\nПроверь и при необходимости пришли свежую редакцию файла мне.")
+    state["watch_last_check"] = today
     save_state(state)
 
 
@@ -377,6 +425,8 @@ def main() -> int:
         try:
             if daily_due(state, "pravo_last_check") and datetime.now().hour >= 9:
                 daily_pravo_check(state)
+            if AMENDMENT_WATCH_ENABLED and daily_due(state, "watch_last_check") and datetime.now().hour >= 9:
+                daily_amendment_watch(state)
             if daily_due(state, "expiry_last_check") and datetime.now().hour >= 9:
                 daily_expiry_check(state)
         except Exception as e:
