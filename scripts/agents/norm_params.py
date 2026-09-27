@@ -112,6 +112,36 @@ def _extract_params(briefing: str, src_line: str, year: int) -> List[Dict[str, A
                     "source": str(p.get("source", ""))[:160],
                     "url": str(p.get("url", ""))[:300],
                 })
+        # Обязательный минимум: основная ставка НДС и базовая ставка НДФЛ должны
+        # быть ВСЕГДА (кейс: экстракция их теряла -> «20%» безнаказанно жил в тексте).
+        have_vat = any("ндс" in p["name"].lower() for p in clean_params)
+        have_ndfl = any("ндфл" in p["name"].lower() for p in clean_params)
+        if not have_vat or not have_ndfl:
+            fix = client.chat.completions.create(
+                model=os.getenv("MODEL_DEEPSEEK_FLASH", "deepseek-v4-flash"),
+                messages=[
+                    {"role": "system", "content": EXTRACT_SYSTEM},
+                    {"role": "user", "content": user},
+                    {"role": "assistant", "content": json.dumps(data, ensure_ascii=False)},
+                    {"role": "user", "content":
+                        f"В списке параметров {'НЕТ ставки НДС' if not have_vat else ''}"
+                        f"{' и НЕТ ставки НДФЛ' if not have_ndfl else ''}. "
+                        f"ДОБАВЬ недостающие параметры из брифинга (основная ставка НДС на {year} "
+                        f"с old_value прошлых лет, например 20%→22%; базовые ставки НДФЛ). "
+                        f"Верни полный JSON заново."},
+                ],
+                response_format={"type": "json_object"}, temperature=0.0, timeout=90.0)
+            data = json.loads(fix.choices[0].message.content)
+            clean_params = []
+            for p in (data.get("params") or [])[:10]:
+                if isinstance(p, dict) and p.get("name") and p.get("value"):
+                    clean_params.append({
+                        "name": str(p["name"])[:120],
+                        "value": str(p["value"])[:140],
+                        "old_value": str(p.get("old_value", "") or "")[:140],
+                        "source": str(p.get("source", ""))[:160],
+                        "url": str(p.get("url", ""))[:300],
+                    })
         clean_scen = []
         for s in (data.get("scenarios") or [])[:5]:
             if isinstance(s, dict) and s.get("status_before") and s.get("event"):
@@ -314,6 +344,50 @@ def check_matrix_compliance(draft: str, params_field) -> List[str]:
     except Exception as e:
         logger.warning(f"matrix compliance сбой: {e}")
         return []
+
+
+def fix_matrix_violations(draft: str, issues: List[str], params_field) -> str:
+    """Автоправка качественных противоречий матрице: один DeepSeek-вызов,
+    «исправь ТОЛЬКО отмеченные места». Возвращает исправленный текст или исходный."""
+    _, scenarios = _unwrap(params_field)
+    if not draft or not issues or not scenarios:
+        return draft
+    try:
+        from openai import OpenAI
+        client = OpenAI(
+            api_key=os.getenv("DEEPSEEK_API_KEY", ""),
+            base_url=os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com/v1"),
+            timeout=150.0)
+        scen_text = "\n".join(
+            f"{i}. {s.get('status_before','?')} | {s.get('event','?')} | "
+            f"дата: {s.get('effect_date','?')} | срок: {s.get('deadline','—')} | "
+            f"режим после: {s.get('regime_after','?')}"
+            for i, s in enumerate(scenarios, 1))
+        system = (
+            "Ты юридический корректор. Тебе дан текст статьи и список ПРОТИВОРЕЧИЙ "
+            "сценарной матрице. Исправь ТОЛЬКО отмеченные места, приведя их в соответствие "
+            "с матрицей. НЕ переписывай остальное, сохраняй объём (±10%), стиль, заголовки "
+            "и разметку. Верни полный исправленный текст статьи без комментариев."
+        )
+        user = (
+            f"МАТРИЦА:\n{scen_text}\n\nПРОТИВОРЕЧИЯ ДЛЯ ИСПРАВЛЕНИЯ:\n"
+            + "\n".join(f"- {i}" for i in issues)
+            + f"\n\nТЕКСТ:\n{draft[:14000]}"
+        )
+        resp = client.chat.completions.create(
+            model=os.getenv("MODEL_DEEPSEEK_PRO", "deepseek-v4-pro"),
+            messages=[{"role": "system", "content": system},
+                      {"role": "user", "content": user}],
+            temperature=0.1, timeout=150.0)
+        fixed = (resp.choices[0].message.content or "").strip()
+        # Защита от переписывания «всего»: объём должен остаться близким
+        if fixed and 0.8 <= len(fixed) / max(1, len(draft)) <= 1.25:
+            return fixed
+        logger.warning("fix_matrix_violations: объём изменился слишком сильно — откат")
+        return draft
+    except Exception as e:
+        logger.warning(f"fix_matrix_violations сбой: {e}")
+        return draft
 
 
 # ============================================================

@@ -723,7 +723,7 @@ class Pipeline:
                 _np = getattr(state, "norm_params", None)
                 if _np:
                     try:
-                        from .norm_params import enforce_params, check_matrix_compliance
+                        from .norm_params import enforce_params, check_matrix_compliance, fix_matrix_violations
                         fixed_text, fixes = enforce_params(state.final_article or "", _np)
                         if fixes:
                             state.final_article = fixed_text
@@ -733,9 +733,33 @@ class Pipeline:
                                 logger.info(f"      • {f}")
                             validation_warnings.append(
                                 f"🟡 Автозамены устаревших значений: {'; '.join(fixes[:5])}")
-                        for issue in check_matrix_compliance(state.final_article or "", _np):
-                            validation_warnings.append(issue)
-                            logger.warning(f"   {issue}")
+                        matrix_issues = check_matrix_compliance(state.final_article or "", _np)
+                        critical_matrix = [i for i in matrix_issues if i.startswith("🔴")]
+                        if critical_matrix:
+                            # Автоправка качественных противоречий (даты/сроки/статусы),
+                            # затем повторная сверка — что осталось, идёт в гейт.
+                            logger.info(f"   🔧 Автоправка противоречий матрице: {len(critical_matrix)}")
+                            corrected = fix_matrix_violations(
+                                state.final_article or "", critical_matrix, _np)
+                            if corrected != state.final_article:
+                                state.final_article = corrected
+                                state.draft = corrected
+                                remaining = check_matrix_compliance(corrected, _np)
+                                for issue in remaining:
+                                    validation_warnings.append(issue)
+                                    logger.warning(f"   {issue}")
+                                if len(remaining) < len(matrix_issues):
+                                    validation_warnings.append(
+                                        f"🟡 Автоправка матрицы: устранено "
+                                        f"{len(matrix_issues) - len(remaining)} противоречий")
+                            else:
+                                for issue in matrix_issues:
+                                    validation_warnings.append(issue)
+                                    logger.warning(f"   {issue}")
+                        else:
+                            for issue in matrix_issues:
+                                validation_warnings.append(issue)
+                                logger.warning(f"   {issue}")
                     except Exception as e:
                         logger.warning(f"   ⚠️ Петля параметров пропущена: {e}")
 
