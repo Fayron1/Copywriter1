@@ -189,7 +189,7 @@ AGENTS: Dict[str, AgentConfig] = {
         rag=RagConfig(
             top_k=5,
             filters={"agent_target": "booster"},
-            payload_fields=["text", "source_type"],
+            payload_fields=["text", "source_file", "source_type"],
             enabled=False,      # Основной источник — SearXNG, не Qdrant
         ),
     ),
@@ -211,7 +211,7 @@ AGENTS: Dict[str, AgentConfig] = {
             top_k=10,
             filters={"agent_target": "engineer"},
             payload_fields=[
-                "text", "source_type", "chunk_type",
+                "text", "source_file", "source_type", "chunk_type",
                 "distilled_concept", "distilled_application",
             ],
         ),
@@ -236,7 +236,7 @@ AGENTS: Dict[str, AgentConfig] = {
             top_k=10,
             filters={"agent_target": "heart"},
             payload_fields=[
-                "text", "source_type", "chunk_type",
+                "text", "source_file", "source_type", "chunk_type",
                 "rhythm_type",
             ],
         ),
@@ -259,7 +259,7 @@ AGENTS: Dict[str, AgentConfig] = {
             top_k=10,
             filters={"agent_target": "sheriff"},
             payload_fields=[
-                "text", "source_type", "error_type",
+                "text", "source_file", "source_type", "error_type",
                 "chunk_type",
             ],
         ),
@@ -301,7 +301,7 @@ AGENTS: Dict[str, AgentConfig] = {
             top_k=10,
             filters={"agent_target": "booster"},
             payload_fields=[
-                "text", "source_type", "chunk_type",
+                "text", "source_file", "source_type", "chunk_type",
                 "intent_type",
             ],
         ),
@@ -324,7 +324,7 @@ AGENTS: Dict[str, AgentConfig] = {
             top_k=5,
             filters={"agent_target": "artist"},
             payload_fields=[
-                "text", "source_type", "image_style",
+                "text", "source_file", "source_type", "image_style",
             ],
         ),
     ),
