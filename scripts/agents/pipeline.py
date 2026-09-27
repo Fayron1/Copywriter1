@@ -1004,6 +1004,28 @@ class Pipeline:
         else:
             snippets_text = "Свежих данных в сети не найдено. Работай по базовой фактуре."
 
+        # Исследовательский брифинг Vane (Perplexica): синтез с цитатами [N]
+        # поверх сырых сниппетов. Сбой не ломает шаг — Scout работает по сниппетам.
+        vane_block = ""
+        try:
+            from .vane import research as vane_research
+            vr = vane_research(f"{state.topic}: актуальная ситуация, свежие изменения и цифры для бизнеса")
+            if vr.get("message"):
+                src_lines = "\n".join(
+                    f"- {(s.get('title') or '')[:80]}: {s.get('url', '')}"
+                    for s in vr.get("sources", [])[:6] if s.get("url")
+                )
+                vane_block = (
+                    "\n=== ИССЛЕДОВАТЕЛЬСКИЙ БРИФИНГ (метапоиск + синтез; [N] — номер источника) ===\n"
+                    + vr["message"][:3500]
+                    + (("\n--- источники брифинга ---\n" + src_lines) if src_lines else "")
+                    + "\n=== КОНЕЦ БРИФИНГА ===\n\n"
+                )
+                logger.info("      ✅ Vane-брифинг получен "
+                            f"({len(vr.get('sources', []))} источников)")
+        except Exception as e:
+            logger.warning(f"      ⚠️ Vane-брифинг недоступен: {e}")
+
         scout_task = state.brain_output.get('scout_task', 'Найти актуальный угол подачи')
         if not isinstance(scout_task, str):
             scout_task = str(scout_task)
@@ -1012,10 +1034,11 @@ class Pipeline:
             f"Тема: {state.topic}\n"
             f"Направление: {state.direction}\n"
             f"Задание: {scout_task}\n\n"
+            f"{vane_block}"
             f"=== СВЕЖИЕ ДАННЫЕ ИЗ ИНТЕРНЕТА (SearXNG) ===\n"
             f"{snippets_text}\n"
             f"==========================================\n\n"
-            f"Проанализируй эти сниппеты. Выдай hot_queries, угол подачи (angle) и оцени конкурентов."
+            f"Проанализируй брифинг и сниппеты (брифинг приоритетнее). Выдай hot_queries, угол подачи (angle) и оцени конкурентов."
         )
         state.scout_data = self._call_agent("scout", user_msg, state=state)
         state.steps_completed.append("scout")
@@ -3099,7 +3122,10 @@ class Pipeline:
             f"ТРЕБОВАНИЯ:\n"
             f"- Верни ТОЛЬКО переписанный этот раздел в Markdown, начиная с того же заголовка '{'#'*sec.get('level',2)} {sec['heading']}'.\n"
             f"- Сохрани этот же заголовок и примерно тот же объём (~{len(sec['raw'])} символов).\n"
-            f"- Текст должен логично продолжать предыдущий раздел и подводить к следующему.\n"
+            f"- ШОВ СЛЕВА: первое предложение должно подхватывать мысль предыдущего раздела "
+            f"(без пролога, без «Кроме того», без повторов его тезиса дословно).\n"
+            f"- ШОВ СПРАВА: закончи на своей мысли, без резюме и без подведения к следующему "
+            f"заголовку (это сделает сам следующий раздел).\n"
             f"- НЕ добавляй и НЕ удаляй заголовки H2; не пиши ничего вне этого раздела.\n"
         )
         result = self._generate_clean_heart_text(
@@ -4735,6 +4761,16 @@ class Pipeline:
         Префикс: Persona & Scale Lock (паспорт ЦА), если задан Brain.
         """
         persona_prefix = self._persona_block(state)
+        # Отпечаток стиля по типу статьи — дистиллят живых статей издания.
+        # Внедряется ВСЕГДА (не через RAG-лотерею): скелет, ритм, приёмы, CTA.
+        fingerprint_block = ""
+        try:
+            from .style_fingerprints import get_fingerprint
+            fp = get_fingerprint(state.article_type if state else "")
+            if fp:
+                fingerprint_block = fp + "\n\n"
+        except Exception:
+            pass
         # 1. Style Fingerprinting из styles.py
         if state and state.style_id:
             try:
@@ -4748,7 +4784,7 @@ class Pipeline:
                     style_prompt = style_prompt.replace("каждого из 10", f"каждого из {num}")
                     style_prompt = style_prompt.replace("## 10.", f"## {num}.")
                     style_prompt = style_prompt.replace("## 1. ... ## 10.", f"## 1. ... ## {num}.")
-                return persona_prefix + style_prompt
+                return persona_prefix + style_prompt + fingerprint_block
             except (ValueError, ImportError):
                 pass  # Стиль не найден — пробуем клиентский паспорт
 
@@ -4772,4 +4808,4 @@ class Pipeline:
             if self.style.get("expertise_signals"):
                 lines.append(f"- Сигналы экспертности: {', '.join(self.style['expertise_signals'])}")
 
-        return persona_prefix + "\n".join(lines) + "\n\n"
+        return persona_prefix + "\n".join(lines) + "\n\n" + fingerprint_block

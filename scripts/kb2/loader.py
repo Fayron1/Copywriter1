@@ -134,6 +134,27 @@ FOLDERS: Dict[str, Dict[str, Any]] = {
         "agents": ["heart", "booster"], "chunk": "style", "source_type": "style_example",
         "label": "📝 Стиль клиента",
     },
+    # Эталонные статьи по типам (живые тексты копирайтеров — few-shot якоря Heart)
+    "style_client/чек_листы": {
+        "agents": ["heart", "engineer"], "chunk": "style", "source_type": "style_example",
+        "label": "📝 Эталон: чек-листы",
+    },
+    "style_client/ситуации": {
+        "agents": ["heart", "engineer"], "chunk": "style", "source_type": "style_example",
+        "label": "📝 Эталон: ситуации (кейсы)",
+    },
+    "style_client/разбор_законов": {
+        "agents": ["heart", "engineer"], "chunk": "style", "source_type": "style_example",
+        "label": "📝 Эталон: разбор законов",
+    },
+    "style_client/полезное": {
+        "agents": ["heart", "engineer"], "chunk": "style", "source_type": "style_example",
+        "label": "📝 Эталон: справочники",
+    },
+    "style_client/актуальные_проблемы": {
+        "agents": ["heart", "engineer"], "chunk": "style", "source_type": "style_example",
+        "label": "📝 Эталон: лонгриды",
+    },
 }
 
 # Размеры чанков по стратегиям (символы)
