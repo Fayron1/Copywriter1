@@ -4559,6 +4559,12 @@ class Pipeline:
             ],
             "temperature": override_temperature if override_temperature is not None else agent.temperature,
         }
+        # Gemini 3.8 на KIE (per-model -openai шлюз) требует content МАССИВОМ
+        # частей: plain string -> HTTP 200 c {"code":500,"msg":"internal error"}.
+        if "gemini-3-8" in model_name:
+            for m in chat_params["messages"]:
+                if isinstance(m.get("content"), str):
+                    m["content"] = [{"type": "text", "text": m["content"]}]
         if getattr(agent, "top_p", None) is not None:
             chat_params["top_p"] = agent.top_p
 

@@ -30,8 +30,15 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+import subprocess
+import threading
+import zipfile
+
 PROJECT = Path(__file__).resolve().parent.parent.parent
 SCRIPTS = PROJECT / "scripts"
+VENV_PYTHON = PROJECT / "venv" / "bin" / "python"
+OUTPUT_ROOT = PROJECT / "output"
+TOPICS_MD = PROJECT / "topics.md"
 
 
 def _load_env() -> None:
@@ -125,6 +132,86 @@ def download_tg_file(file_id: str, dest: Path) -> bool:
     except Exception as e:
         logger.warning(f"Скачивание файла не удалось: {e}")
         return False
+
+
+def tg_send_document(chat_id: str, path: Path, caption: str = "") -> bool:
+    """Отправить файл в чат (multipart)."""
+    try:
+        with open(path, "rb") as f:
+            r = requests.post(
+                f"{API}/sendDocument",
+                data={"chat_id": chat_id, "caption": caption[:1000]},
+                files={"document": (path.name, f)},
+                timeout=180,
+            )
+        return bool(r.json().get("ok"))
+    except Exception as e:
+        logger.warning(f"sendDocument сбой: {e}")
+        return False
+
+
+# ============================================================
+# Ручная генерация статей /gen <тема>
+# ============================================================
+
+_GEN_RUNNING = [False]
+
+
+def _newest_output_dir(before: set) -> Optional[Path]:
+    """Самый свежий каталог в output/, которого не было до старта."""
+    if not OUTPUT_ROOT.exists():
+        return None
+    candidates = [d for d in OUTPUT_ROOT.iterdir() if d.is_dir() and d.name not in before]
+    if not candidates:
+        candidates = [d for d in OUTPUT_ROOT.iterdir() if d.is_dir()]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda d: d.stat().st_mtime)
+
+
+def _generation_worker(topic: str, cid: str) -> None:
+    _GEN_RUNNING[0] = True
+    try:
+        before = {d.name for d in OUTPUT_ROOT.iterdir() if d.is_dir()} if OUTPUT_ROOT.exists() else set()
+        env = dict(os.environ)
+        env["PYTHONUNBUFFERED"] = "1"
+        cmd = [str(VENV_PYTHON), str(SCRIPTS / "generate.py"), topic,
+               "--chars", "8000", "-p", "deepseek"]
+        logger.info(f"[gen] старт: {topic[:80]}")
+        proc = subprocess.run(cmd, cwd=str(PROJECT), capture_output=True, text=True,
+                              timeout=3600, env=env, encoding="utf-8", errors="replace")
+        out_dir = _newest_output_dir(before)
+        if proc.returncode != 0 or out_dir is None:
+            tail = (proc.stdout or "")[-500:] + (proc.stderr or "")[-500:]
+            tg_call("sendMessage", chat_id=cid,
+                    text=f"❌ Генерация не удалась (код {proc.returncode}).\n{tail[-700:]}")
+            return
+        zip_path = PROJECT / f"article_{out_dir.name[:40]}.zip"
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for f in sorted(out_dir.iterdir()):
+                if f.is_file():
+                    zf.write(f, arcname=f.name)
+        ok = tg_send_document(cid, zip_path, caption=f"✅ Статья готова: «{topic[:80]}»")
+        if not ok:
+            tg_call("sendMessage", chat_id=cid, text="❌ Архив собран, но не отправился. Проверь вручную: " + str(zip_path))
+        else:
+            zip_path.unlink(missing_ok=True)
+        logger.info(f"[gen] готово: {out_dir.name}")
+    except Exception as e:
+        logger.exception(f"[gen] сбой: {e}")
+        tg_call("sendMessage", chat_id=cid, text=f"❌ Сбой генерации: {type(e).__name__}: {e}"[:900])
+    finally:
+        _GEN_RUNNING[0] = False
+
+
+def start_generation(topic: str, cid: str) -> None:
+    if _GEN_RUNNING[0]:
+        tg_call("sendMessage", chat_id=cid, text="⏳ Уже идёт другая генерация — дождись архива.")
+        return
+    tg_call("sendMessage", chat_id=cid,
+            text=(f"🚀 Запускаю генерацию:\n«{topic[:180]}»\n\n"
+                  "Займёт ~10–20 минут. ZIP со статьёй (HTML + MD + паспорт + SEO) придёт сюда."))
+    threading.Thread(target=_generation_worker, args=(topic, cid), daemon=True).start()
 
 
 # ============================================================
@@ -361,10 +448,29 @@ def handle_update(upd: Dict[str, Any]) -> None:
         rebuild_manifest_from_folder(m)
         tg_call("sendMessage", chat_id=cid, text=(
             "Бот базы знаний на связи.\n\n"
-            "Пришли файл (PDF/FB2/DOCX/ODT/TXT) — залью в базу. По умолчанию в "
-            "законодательство; укажи в подписи: «отчет», «справочник», «seo», "
-            "«маркетинг», «методология» или «письмо» — положу в нужную папку.\n\n"
-            "Команды: /status — состояние базы, /list — документы законодательства."))
+            "📝 /gen <тема> — запустить генерацию статьи (из списка /topics или свою); "
+            "ZIP придёт сюда через ~10–20 минут.\n"
+            "📋 /topics — план статей (md-файл).\n"
+            "📤 Просто пришли файл (PDF/FB2/DOCX/TXT) — залью в базу. По умолчанию в "
+            "законодательство; в подписи укажи: «отчет», «справочник», «seo», "
+            "«маркетинг», «методология» или «письмо».\n"
+            "📊 /status — состояние базы, /list — документы законодательства."))
+        return
+
+    if text.startswith("/topics"):
+        if TOPICS_MD.exists():
+            tg_send_document(cid, TOPICS_MD, caption="План статей, волна 1 (30 тем). /gen <тема> — запуск генерации.")
+        else:
+            tg_call("sendMessage", chat_id=cid, text="topics.md не найден на сервере.")
+        return
+
+    if text.startswith("/gen"):
+        topic = text[4:].strip()
+        if not topic:
+            tg_call("sendMessage", chat_id=cid,
+                    text="Формат: /gen <тема>. Список тем: /topics")
+            return
+        start_generation(topic, cid)
         return
 
     if text.startswith("/status"):

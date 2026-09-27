@@ -74,8 +74,11 @@ MODELS: Dict[str, str] = {
     # DeepSeek — основной провайдер генерации текста
     "deepseek_pro":   os.getenv("MODEL_DEEPSEEK_PRO",   "deepseek-v4-pro"),
     "deepseek_flash": os.getenv("MODEL_DEEPSEEK_FLASH", "deepseek-v4-flash"),
-    # Внешний ревизор для QUALITY_MODE
-    "external_reviewer": os.getenv("MODEL_EXTERNAL_REVIEWER", "gemini-3.1-pro"),
+    # Внешний ревизор для QUALITY_MODE: Gemini 3.8 Flash через KIE per-model
+    # шлюз (api.kie.ai/gemini-3-8-flash-openai/v1 — _get_kie_client строит URL
+    # из имени). Модель НЕСТАБИЛЬНАЯ: ~50% запросов отдают internal error,
+    # pipeline ретраит; retry_on_fail поднят до 4.
+    "external_reviewer": os.getenv("MODEL_EXTERNAL_REVIEWER", "gemini-3-8-flash-openai"),
     # OpenAI — fallback при provider="openai"
     "openai_text":    os.getenv("MODEL_OPENAI_TEXT",    "gpt-4o"),
     # KIE — fallback при provider="kie"
@@ -339,7 +342,8 @@ AGENTS: Dict[str, AgentConfig] = {
         model=MODELS["external_reviewer"],
         temperature=0.1,
         max_tokens=4000,
-        description="Внешний аудит качества и логики на базе Gemini 3.1 Pro.",
+        retry_on_fail=4,        # Gemini 3.8 Flash нестабильна (~50% internal error)
+        description="Внешний аудит качества и логики на базе Gemini 3.8 Flash.",
         input_from=["heart"],
         output_to=["heart"],
         rag=RagConfig(enabled=False),
