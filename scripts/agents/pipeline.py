@@ -723,7 +723,16 @@ class Pipeline:
                 _np = getattr(state, "norm_params", None)
                 if _np:
                     try:
-                        from .norm_params import enforce_params, check_matrix_compliance, fix_matrix_violations
+                        from .norm_params import (enforce_params, check_matrix_compliance,
+                                                  fix_matrix_violations, fix_markdown_tables,
+                                                  lint_form_deadline)
+                        # 0. Исправление Markdown-таблиц (Heart пишет | — | вместо | --- |)
+                        tbl_text, tbl_fixes = fix_markdown_tables(state.final_article or "")
+                        if tbl_fixes:
+                            state.final_article = tbl_text
+                            state.draft = tbl_text
+                            logger.info(f"   🔧 Markdown-таблицы: исправлено разделителей: {tbl_fixes}")
+                        # 1. Детерминированные замены устаревших чисел
                         fixed_text, fixes = enforce_params(state.final_article or "", _np)
                         if fixes:
                             state.final_article = fixed_text
@@ -760,6 +769,10 @@ class Pipeline:
                             for issue in matrix_issues:
                                 validation_warnings.append(issue)
                                 logger.warning(f"   {issue}")
+                        # Форма/срок/ПСН-линтер (правила от редактора 2026-09-27)
+                        for issue in lint_form_deadline(state.final_article or "", _np):
+                            validation_warnings.append(issue)
+                            logger.warning(f"   {issue}")
                     except Exception as e:
                         logger.warning(f"   ⚠️ Петля параметров пропущена: {e}")
 
