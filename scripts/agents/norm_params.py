@@ -467,13 +467,32 @@ def lint_form_deadline(text: str, params_field=None) -> List[str]:
     return issues
 
 
+_PLACEHOLDER_PATTERNS = [
+    (re.compile(r"стать[уяе]\s+от\s+(?:(?:КоАП|НК|ГК|ТК)|$|\.)", re.I), "заглушка «статья от»"),
+    (re.compile(r"ст\.\s*от\s+", re.I), "заглушка «ст. от»"),
+    (re.compile(r"по\s+статье\s+от\s", re.I), "заглушка «по статье от»"),
+    (re.compile(r"стать[уяе]\s+от\s*[^0-9]", re.I), "заглушка: после «от» нет номера"),
+]
+_PSEUDO_EXPERT = [
+    "на моей практике", "в моей практике", "я сопровождал", "мы защищали",
+    "я не раз видел", "моим клиентам",
+]
+_UNVERIFIED_COST = re.compile(
+    r"(?:обходится|стоит|стоит порядка|составляет|потребует|выйдет)\s*(?:в|от|порядка)?\s*[\d\s]{3,}\s*(?:тыс|млн|руб|₽| тысяч| миллионов| рублей)", re.I)
+
+
 def lint_legal(text: str) -> List[str]:
-    """Оборванные ссылки, абсолюты без источника, псевдо-практика, формы без оговорки."""
+    """Оборванные ссылки, абсолюты без источника, псевдо-практика, формы без оговорки,
+    заглушки статей, псевдо-экспертность, неподтверждённые цены."""
     issues = []
     for pat, desc in _BROKEN_CITATION_PATTERNS:
         for m in list(pat.finditer(text))[:3]:
             frag = text[max(0, m.start() - 20):m.end() + 25].replace("\n", " ")
             issues.append(f"🔴 БИТАЯ ССЫЛКА ({desc}): …{frag}…")
+    # Заглушки статей (кейс: «статья от КоАП РФ» без номера — 2026-09-27)
+    for pat, desc in _PLACEHOLDER_PATTERNS:
+        for m in list(pat.finditer(text))[:3]:
+            issues.append(f"🔴 ЗАГЛУШКА СТАТЬИ ({desc}): «{m.group(0)}» — номер обязателен")
     low = text.lower()
     hits = [w for w in _ABSOLUTES if w in low]
     if hits:
@@ -486,6 +505,16 @@ def lint_legal(text: str) -> List[str]:
             if "условный пример" not in window and "условн" not in window:
                 issues.append(f"🟡 ПСЕВДО-ПРАКТИКА: «{phrase}» без маркировки "
                               f"«Условный пример» или источника — переформулируйте")
+    # Псевдо-экспертность (кейс: «на моей практике как IT-юриста» — 2026-09-27)
+    for phrase in _PSEUDO_EXPERT:
+        if phrase in low:
+            issues.append(f"🔴 ПСЕВДО-ЭКСПЕРТ: «{phrase}» — ИИ не может выдумывать "
+                          f"личный профессиональный опыт. Замените на нейтральную формулировку.")
+    # Неподтверждённые цены миграции/работ
+    for m in list(_UNVERIFIED_COST.finditer(text))[:2]:
+        frag = text[max(0, m.start() - 30):m.end() + 20].replace("\n", " ")
+        issues.append(f"🟡 ЦЕНА БЕЗ ИСТОЧНИКА: «{frag}» — рыночная оценка без источника; "
+                      f"уберите цифру или маркируйте как условную")
     for m in list(_FORM_RE.finditer(text))[:3]:
         window = text[max(0, m.start() - 80):m.end() + 80].lower()
         if "актуальн" not in window and "проверьт" not in window:
