@@ -108,14 +108,11 @@ def lint_year_rules(text: str, year: int, params_field) -> List[str]:
     params, _ = _unwrap(params_field)
     if year in KNOWN_FUTURE_RULES:
         for rule_key, rule in KNOWN_FUTURE_RULES[year].items():
-            cur_val_num = re.search(r"(\d[\d\s]*)\s*(?:млн|₽)", rule["current_2026"])
-            if cur_val_num and cur_val_num.group(1).replace(" ", "") in text:
-                # Текст содержит значение 2026 года для темы, посвящённой {year}
-                # — не блокируем (значение могло быть историческим контекстом),
-                # но если ОНО подаётся как действующее на {year} — критично.
-                # Проверяем по паспорту: если паспорт на {year} не содержит expected — warning
+            # Число из «20 000 000» — первое число строки (пробелы не блокируют)
+            cur_val_num = re.search(r"(\d[\d\s]*\d|\d)", rule["current_2026"])
+            if cur_val_num and cur_val_num.group(1).replace(" ", "") in text.replace(" ", ""):
                 all_param_values = " ".join(p.get("value", "") for p in params)
-                if rule["expected_2027"][:3] not in all_param_values.replace(" ", ""):
+                if rule["expected_2027"][:3].replace(" ", "") not in all_param_values.replace(" ", ""):
                     issues.append(
                         f"🔴 ПАСПОРТ {year}: параметр «{rule_key}» — в паспорте нет значения "
                         f"{rule['expected_2027']} (действует {rule['current_2026']} только в 2026). "
