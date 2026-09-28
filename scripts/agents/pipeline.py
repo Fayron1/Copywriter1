@@ -4728,7 +4728,28 @@ class Pipeline:
         # Динамический выбор клиента и модели на основе провайдера
         current_client = self.deepseek_client  # По умолчанию DeepSeek
         model_name = agent.model  # По умолчанию модель агента
-        
+
+        # HEART_MODEL_OVERRIDE: точечная замена модели Писателя без изменения
+        # остальных агентов. Формат: "provider:model" или просто "model".
+        # Примеры: HEART_MODEL_OVERRIDE="kie:gemini-3-8-flash-openai"
+        #           HEART_MODEL_OVERRIDE="kie:claude-opus-5-5"
+        if agent_id == "heart" and not override_model:
+            hm = os.getenv("HEART_MODEL_OVERRIDE", "").strip()
+            if hm:
+                if ":" in hm:
+                    hm_provider, hm_model = hm.split(":", 1)
+                    if hm_provider.lower() == "kie" and self._kie_api_key:
+                        model_name = hm_model
+                        current_client = self._get_kie_client(hm_model)
+                        logger.info(f"   ✍️ Heart → KIE / {hm_model}")
+                    elif hm_provider.lower() == "openai" and self.openai_client:
+                        model_name = hm_model
+                        current_client = self.openai_client
+                        logger.info(f"   ✍️ Heart → OpenAI / {hm_model}")
+                else:
+                    model_name = hm  # через текущий провайдер (DeepSeek)
+                    logger.info(f"   ✍️ Heart → {hm}")
+
         is_external_reviewer_kie = False
         if override_provider:
             provider = override_provider.lower()
