@@ -2722,12 +2722,29 @@ class Pipeline:
 
         current_msg = user_msg
         for attempt in range(max_retries):
-            result = self._call_agent(
-                "heart", current_msg, parse_json=False, target_chars=target_chars, state=state,
-                override_model=override_model,
-                override_provider=override_provider,
-                override_temperature=override_temperature
-            )
+            try:
+                result = self._call_agent(
+                    "heart", current_msg, parse_json=False, target_chars=target_chars, state=state,
+                    override_model=override_model,
+                    override_provider=override_provider,
+                    override_temperature=override_temperature
+                )
+            except Exception as api_err:
+                # ── API ERROR FALLBACK: Claude 500/timeout/empty → след. модель ──
+                if chain and chain_idx < len(chain) - 1:
+                    next_idx = chain_idx + 1
+                    next_model = chain[next_idx]
+                    self._heart_chain_idx = next_idx
+                    logger.warning(
+                        f"   🔄 Heart: модель [{chain_idx + 1}] API-ошибка "
+                        f"({type(api_err).__name__}: {str(api_err)[:80]}) "
+                        f"→ переключаюсь на [{next_idx + 1}] {next_model}")
+                    return self._generate_clean_heart_text(
+                        user_msg, max_retries=max_retries, target_chars=target_chars,
+                        state=state, override_model=None, override_provider=None,
+                        override_temperature=override_temperature)
+                raise  # больше нечего пробовать — пускаем ошибку выше
+
             text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
 
             # ── MODEL CHAIN FALLBACK: пустой/короткий/битый результат → след. модель
