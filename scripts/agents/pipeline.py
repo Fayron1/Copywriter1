@@ -793,6 +793,19 @@ class Pipeline:
 
                 # Сохраняем для publish-gate в паспорте статьи (generate.py)
                 state.final_warnings = validation_warnings
+
+                # ── COVERAGE AUDIT: проверка что Heart не добавил новые факты ──
+                _claims = getattr(state, "claims", None)
+                if _claims:
+                    try:
+                        from .claim_ledger import audit_coverage
+                        coverage_issues = audit_coverage(state.final_article or "", _claims)
+                        for ci in coverage_issues:
+                            validation_warnings.append(ci)
+                            logger.warning(f"   {ci}")
+                    except Exception as e:
+                        logger.warning(f"   ⚠️ Coverage Audit пропущен: {e}")
+
                 for w in validation_warnings:
                     logger.warning(w)
 
@@ -975,6 +988,20 @@ class Pipeline:
         # Постфильтр: отбрасываем факты с очень низкой надёжностью (secondary без URL).
         # Это детерминированная защита от мусорных сниппетов до того, как они попадут в Heart.
         self._filter_low_reliability_facts(state)
+
+        # ── EVIDENCE-FIRST: Claim Ledger ──
+        # 1. Извлечь атомарные утверждения из фактов
+        # 2. Отфильтровать (insufficient → исключены)
+        # 3. Собрать claim pack → Heart получает ТОЛЬКО approved факты
+        try:
+            from .claim_ledger import extract_claims, build_claim_pack, audit_coverage
+            state.claims = extract_claims(state.facts, state.topic)
+            state.claim_pack = build_claim_pack(state.claims)
+            if state.claim_pack:
+                logger.info(f"   📋 Claim Ledger: {len(state.claims)} утверждений, "
+                            f"pack {len(state.claim_pack)} симв. для Heart")
+        except Exception as e:
+            logger.warning(f"   ⚠️ Claim Ledger пропущен: {e}")
 
         # Паспорт параметров «год x норма» (строгие темы): действующие пороги/ставки
         # на год статьи + чёрный список устаревших. Контроль конфликта версий —
@@ -1475,7 +1502,14 @@ class Pipeline:
             rag_block += "\n\n=== РЕАЛЬНЫЕ ОБРАЗЦЫ ПРЕМИАЛЬНОГО B2B СТИЛЯ (ДЛЯ КОПИРОВАНИЯ ИНТОНАЦИИ) ===\n" + "\n".join(anchors)
 
         # Калькулятор идёт В НАЧАЛО контекста (приоритет над всем)
-        rag_block = calc_block + rag_block
+        # Claim Pack идёт ПЕРВЫМ (выше калькулятора, параметров и RAG) —
+        # это ЕДИНСТВЕННЫЙ источник фактов для Heart
+        _claim_pack = getattr(state, "claim_pack", "")
+        if _claim_pack:
+            rag_block = _claim_pack + "\n" + calc_block + rag_block
+            logger.info("   📋 Claim Pack внедрён в контекст Heart")
+        else:
+            rag_block = calc_block + rag_block
 
         # Автоподбор модели для черновика
         suggested = self._suggest_draft_model(state.topic, state.article_type, state.description)
