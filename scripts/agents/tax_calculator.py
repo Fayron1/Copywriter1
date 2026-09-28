@@ -242,20 +242,34 @@ def calc_scenario(inp: ScenarioInput) -> ScenarioResult:
             ]
         else:  # IP на ОСНО
             base = max(0, r.revenue_ex_vat - r.purchases_ex_vat - inp.payroll - r.insurance_employer)
-            rate = P["ndfl_ip_rate_base"]
-            if base > 50_000_000:
-                rate = 0.22
-            elif base > 20_000_000:
-                rate = 0.20
-            elif base > 5_000_000:
-                rate = 0.18
-            elif base > 2_400_000:
-                rate = 0.15
-            r.profit_or_ndfl_tax = base * rate
+            # Прогрессивная шкала НДФЛ — по СТУПЕНЯМ, не плоской ставкой
+            brackets = [
+                (2_400_000, 0.13),
+                (5_000_000, 0.15),
+                (20_000_000, 0.18),
+                (50_000_000, 0.20),
+                (float('inf'), 0.22),
+            ]
+            ndfl = 0.0
+            remaining = base
+            prev_threshold = 0.0
+            bracket_details = []
+            for threshold, rate in brackets:
+                if remaining <= 0:
+                    break
+                taxable_in_bracket = min(remaining, threshold - prev_threshold)
+                tax_in_bracket = taxable_in_bracket * rate
+                ndfl += tax_in_bracket
+                if taxable_in_bracket > 0:
+                    bracket_details.append(f"{taxable_in_bracket:,.0f} × {rate*100:.0f}% = {tax_in_bracket:,.0f} ₽")
+                remaining -= taxable_in_bracket
+                prev_threshold = threshold
+            r.profit_or_ndfl_tax = ndfl
             r.profit_base = base
-            r.formulas.append(f"НДФЛ ИП = ({r.revenue_ex_vat:,.0f} − {r.purchases_ex_vat:,.0f} "
-                              f"− {inp.payroll:,.0f} − {r.insurance_employer:,.0f}) "
-                              f"× {rate*100:.0f}% = {r.profit_or_ndfl_tax:,.0f} ₽")
+            r.formulas.append(f"НДФЛ ИП (прогрессивная шкала, по ступеням):")
+            for bd in bracket_details:
+                r.formulas.append(f"  {bd}")
+            r.formulas.append(f"  Итого НДФЛ = {ndfl:,.0f} ₽")
             ins = P["insurance_fixed"]
             if r.revenue_ex_vat > P["insurance_1pct_threshold"]:
                 ins += min((r.revenue_ex_vat - P["insurance_1pct_threshold"]) * 0.01, P["insurance_1pct_max"])
@@ -265,8 +279,8 @@ def calc_scenario(inp: ScenarioInput) -> ScenarioResult:
                 f"Закупки (без НДС):     {r.purchases_ex_vat:>14,.0f} ₽",
                 f"ФОТ:                   {inp.payroll:>14,.0f} ₽",
                 f"Взносы работодателя:   {r.insurance_employer:>14,.0f} ₽",
-                f"Проф. доход:           {base:>14,.0f} ₽",
-                f"НДФЛ ({rate*100:.0f}%):        {r.profit_or_ndfl_tax:>14,.0f} ₽",
+                f"Предприним. доход:     {base:>14,.0f} ₽",
+                f"НДФЛ (по ступеням):    {ndfl:>14,.0f} ₽",
             ]
 
     # ── 4. Совокупная нагрузка (УСН после уменьшения на взносы) ──
