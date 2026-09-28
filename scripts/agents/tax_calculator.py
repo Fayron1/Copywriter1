@@ -87,12 +87,17 @@ class ScenarioResult:
     profit_or_ndfl_tax: float = 0.0
     profit_base: float = 0.0
     insurance: float = 0.0
+    # Трассировка (для полной воспроизводимости)
+    payroll: float = 0.0
+    insurance_employer: float = 0.0
+    other_expenses: float = 0.0
     # Итог
     total_burden: float = 0.0
-    effective_rate: float = 0.0     # total / revenue_ex_vat
+    effective_rate: float = 0.0
     # Пояснения для Heart
     formulas: List[str] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
+    traceability: List[str] = field(default_factory=list)
     ok: bool = True
     error: Optional[str] = None
 
@@ -175,6 +180,11 @@ def calc_scenario(inp: ScenarioInput) -> ScenarioResult:
         return r
 
     # ── 3. Налог режима ──
+    # Трассировка: все входные параметры фиксируются для воспроизводимости
+    r.payroll = inp.payroll
+    # Взносы работодателя (~30% от ФОТ, упрощённо)
+    r.insurance_employer = inp.payroll * 0.30 if inp.employees else 0.0
+
     if inp.regime == "USN":
         if inp.usn_object == "income":
             rate = inp.usn_rate_override or P["usn_income_rate"]
@@ -211,16 +221,27 @@ def calc_scenario(inp: ScenarioInput) -> ScenarioResult:
             r.usn_after_reduction = r.usn_tax  # на «доходы-расходы» взносы идут в расходы, не уменьшают налог
             r.notes.append("УСН «доходы минус расходы»: взносы учитываются в расходах, налог напрямую не уменьшают.")
     elif inp.regime == "OSNO":
+        # Трассировка базы прибыли: выручка − закупки − ФОТ − взносы работодателя
+        r.other_expenses = 0.0
         if inp.legal_form == "OOO":
-            base = max(0, r.revenue_ex_vat - r.purchases_ex_vat - inp.payroll)
+            base = max(0, r.revenue_ex_vat - r.purchases_ex_vat - inp.payroll - r.insurance_employer)
             r.profit_or_ndfl_tax = base * P["profit_tax_rate"]
             r.profit_base = base
-            r.formulas.append(f"Налог на прибыль = ({r.revenue_ex_vat:,.0f} − {r.purchases_ex_vat:,.0f} − {inp.payroll:,.0f}) × 25% = {r.profit_or_ndfl_tax:,.0f} ₽")
+            r.formulas.append(f"Налог на прибыль = ({r.revenue_ex_vat:,.0f} − {r.purchases_ex_vat:,.0f} "
+                              f"− {inp.payroll:,.0f} (ФОТ) − {r.insurance_employer:,.0f} (взносы раб.)) "
+                              f"× 25% = {r.profit_or_ndfl_tax:,.0f} ₽")
             r.notes.append("ОСНО ООО: налог на прибыль 25% (2026). НДС по общей механике с вычетами.")
             r.insurance = 0.0  # взносы уже в payroll
+            r.traceability = [
+                f"Выручка (без НДС):     {r.revenue_ex_vat:>14,.0f} ₽",
+                f"Закупки (без НДС):     {r.purchases_ex_vat:>14,.0f} ₽",
+                f"ФОТ:                   {inp.payroll:>14,.0f} ₽",
+                f"Взносы работодателя:   {r.insurance_employer:>14,.0f} ₽ (30% от ФОТ)",
+                f"Налоговая прибыль:     {base:>14,.0f} ₽",
+                f"Налог на прибыль 25%:  {r.profit_or_ndfl_tax:>14,.0f} ₽",
+            ]
         else:  # IP на ОСНО
-            base = max(0, r.revenue_ex_vat - r.purchases_ex_vat - inp.payroll)
-            # Упрощение: применяем базовую НДФЛ. Для высоких доходов — прогрессивная шкала.
+            base = max(0, r.revenue_ex_vat - r.purchases_ex_vat - inp.payroll - r.insurance_employer)
             rate = P["ndfl_ip_rate_base"]
             if base > 50_000_000:
                 rate = 0.22
@@ -232,11 +253,21 @@ def calc_scenario(inp: ScenarioInput) -> ScenarioResult:
                 rate = 0.15
             r.profit_or_ndfl_tax = base * rate
             r.profit_base = base
-            r.formulas.append(f"НДФЛ ИП = ({r.revenue_ex_vat:,.0f} − расходы) × {rate*100:.0f}% = {r.profit_or_ndfl_tax:,.0f} ₽ (упрощённо по базовой шкале)")
+            r.formulas.append(f"НДФЛ ИП = ({r.revenue_ex_vat:,.0f} − {r.purchases_ex_vat:,.0f} "
+                              f"− {inp.payroll:,.0f} − {r.insurance_employer:,.0f}) "
+                              f"× {rate*100:.0f}% = {r.profit_or_ndfl_tax:,.0f} ₽")
             ins = P["insurance_fixed"]
             if r.revenue_ex_vat > P["insurance_1pct_threshold"]:
                 ins += min((r.revenue_ex_vat - P["insurance_1pct_threshold"]) * 0.01, P["insurance_1pct_max"])
             r.insurance = ins
+            r.traceability = [
+                f"Выручка (без НДС):     {r.revenue_ex_vat:>14,.0f} ₽",
+                f"Закупки (без НДС):     {r.purchases_ex_vat:>14,.0f} ₽",
+                f"ФОТ:                   {inp.payroll:>14,.0f} ₽",
+                f"Взносы работодателя:   {r.insurance_employer:>14,.0f} ₽",
+                f"Проф. доход:           {base:>14,.0f} ₽",
+                f"НДФЛ ({rate*100:.0f}%):        {r.profit_or_ndfl_tax:>14,.0f} ₽",
+            ]
 
     # ── 4. Совокупная нагрузка (УСН после уменьшения на взносы) ──
     usn_final = getattr(r, "usn_after_reduction", None)
@@ -327,6 +358,10 @@ def format_for_heart(results: List[ScenarioResult]) -> str:
             lines.append(f"**{r.name}:**")
             for f in r.formulas:
                 lines.append(f"  • {f}")
+            if r.traceability:
+                lines.append("  📊 Трассировка расчёта:")
+                for tr in r.traceability:
+                    lines.append(f"     {tr}")
             for n in r.notes:
                 lines.append(f"  ℹ️ {n}")
             lines.append("")
