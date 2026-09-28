@@ -73,7 +73,22 @@ def extract_claims(facts: Dict[str, Any], topic: str = "") -> List[Dict[str, Any
     Выход: список claim-объектов для верификации.
     """
     claims = []
-    items = facts.get("facts", []) if isinstance(facts, dict) else []
+    # Fact-Finder может вернуть несколько форматов:
+    # 1. {"facts": [...], "key_entities": [...]}  — стандартный JSON
+    # 2. [{"claim": ...}, ...]                     — список напрямую
+    # 3. {"facts": "текст"}                        — строка вместо списка
+    items = []
+    if isinstance(facts, dict):
+        raw = facts.get("facts", [])
+        if isinstance(raw, list):
+            items = raw
+        elif isinstance(raw, str) and raw.strip():
+            # Строка → разбить на предложения как pseudo-claims
+            sentences = [s.strip() for s in re.split(r'[.!?]\s+', raw) if len(s.strip()) > 20]
+            items = [{"claim": s, "source": "", "source_class": "secondary", "reliability": 0.5}
+                     for s in sentences]
+    elif isinstance(facts, list):
+        items = facts
 
     for i, fact in enumerate(items):
         if not isinstance(fact, dict):
