@@ -2710,11 +2710,16 @@ class Pipeline:
 
 
     def _generate_clean_heart_text(self, user_msg: str, max_retries: int = 2, target_chars: int = 0, state: PipelineState = None, override_model=None, override_provider=None, override_temperature=None) -> str:
-        """Внутренняя обертка с мягкими проверками и авто-очисткой для Писателя."""
+        """Внутренняя обертка с мягкими проверками и авто-очисткой для Писателя.
+        Поддерживает HEART_MODEL_CHAIN: при пустом/коротком результате
+        автоматически переходит к следующей модели в цепочке."""
         from .stopwords import ALL_STOP_WORDS
         import re
         stop_words = ALL_STOP_WORDS
-        
+
+        chain = getattr(self, "_heart_chain", None)
+        chain_idx = getattr(self, "_heart_chain_idx", 0)
+
         current_msg = user_msg
         for attempt in range(max_retries):
             result = self._call_agent(
@@ -2724,7 +2729,22 @@ class Pipeline:
                 override_temperature=override_temperature
             )
             text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
-            
+
+            # ── MODEL CHAIN FALLBACK: пустой/короткий/битый результат → след. модель
+            if chain and chain_idx < len(chain) - 1:
+                if not text or len(text.strip()) < 500 or "internal error" in text.lower():
+                    next_idx = chain_idx + 1
+                    next_model = chain[next_idx]
+                    self._heart_chain_idx = next_idx
+                    logger.warning(
+                        f"   🔄 Heart: модель [{chain_idx + 1}] дала непригодный результат "
+                        f"({len(text)} симв.) → переключаюсь на [{next_idx + 1}] {next_model}")
+                    # Рекурсивный вызов с новой моделью (следующая в цепочке)
+                    return self._generate_clean_heart_text(
+                        user_msg, max_retries=max_retries, target_chars=target_chars,
+                        state=state, override_model=None, override_provider=None,
+                        override_temperature=override_temperature)
+
             # 1. Проверяем штампы: просим переписать только при сильном загрязнении (>= 3 штампа) и только 1 раз (attempt < 1)
             lower_text = text.lower()
             found_words = [w for w in stop_words if w in lower_text]
@@ -4729,26 +4749,29 @@ class Pipeline:
         current_client = self.deepseek_client  # По умолчанию DeepSeek
         model_name = agent.model  # По умолчанию модель агента
 
-        # HEART_MODEL_OVERRIDE: точечная замена модели Писателя без изменения
-        # остальных агентов. Формат: "provider:model" или просто "model".
-        # Примеры: HEART_MODEL_OVERRIDE="kie:gemini-3-8-flash-openai"
-        #           HEART_MODEL_OVERRIDE="kie:claude-opus-5-5"
+        # ── HEART MODEL CHAIN: цепочка моделей Писателя с фолбэком ──
+        # Формат: "model1,model2,model3" — пробуем по очереди.
+        # Каждый провайдер через ":" → "kie:claude-opus-5-5,kie:gemini-3-8-flash-openai"
+        # При сбое (500/timeout/обрыв) — следующая модель в цепочке.
+        # Финальный фолбэк — дефолтная модель агента (deepseek-v4-pro).
         if agent_id == "heart" and not override_model:
-            hm = os.getenv("HEART_MODEL_OVERRIDE", "").strip()
-            if hm:
-                if ":" in hm:
-                    hm_provider, hm_model = hm.split(":", 1)
-                    if hm_provider.lower() == "kie" and self._kie_api_key:
-                        model_name = hm_model
-                        current_client = self._get_kie_client(hm_model)
-                        logger.info(f"   ✍️ Heart → KIE / {hm_model}")
-                    elif hm_provider.lower() == "openai" and self.openai_client:
-                        model_name = hm_model
-                        current_client = self.openai_client
-                        logger.info(f"   ✍️ Heart → OpenAI / {hm_model}")
-                else:
-                    model_name = hm  # через текущий провайдер (DeepSeek)
-                    logger.info(f"   ✍️ Heart → {hm}")
+            chain_raw = os.getenv("HEART_MODEL_CHAIN", "").strip()
+            if chain_raw:
+                self._heart_chain = [m.strip() for m in chain_raw.split(",") if m.strip()]
+                self._heart_chain_idx = getattr(self, "_heart_chain_idx", 0)
+                if self._heart_chain_idx < len(self._heart_chain):
+                    hm = self._heart_chain[self._heart_chain_idx]
+                    if ":" in hm:
+                        hm_provider, hm_model = hm.split(":", 1)
+                        if hm_provider.lower() == "kie" and self._kie_api_key:
+                            model_name = hm_model
+                            current_client = self._get_kie_client(hm_model)
+                        elif hm_provider.lower() == "openai" and self.openai_client:
+                            model_name = hm_model
+                            current_client = self.openai_client
+                    else:
+                        model_name = hm
+                    logger.info(f"   ✍️ Heart → [{self._heart_chain_idx + 1}/{len(self._heart_chain)}] {model_name}")
 
         is_external_reviewer_kie = False
         if override_provider:
