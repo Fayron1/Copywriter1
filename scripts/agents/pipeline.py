@@ -4750,10 +4750,8 @@ class Pipeline:
         model_name = agent.model  # По умолчанию модель агента
 
         # ── HEART MODEL CHAIN: цепочка моделей Писателя с фолбэком ──
-        # Формат: "model1,model2,model3" — пробуем по очереди.
-        # Каждый провайдер через ":" → "kie:claude-opus-5-5,kie:gemini-3-8-flash-openai"
-        # При сбое (500/timeout/обрыв) — следующая модель в цепочке.
-        # Финальный фолбэк — дефолтная модель агента (deepseek-v4-pro).
+        # Работает через override_provider/override_model — тот же механизм,
+        # что и у external_reviewer (проверен в проде).
         if agent_id == "heart" and not override_model:
             chain_raw = os.getenv("HEART_MODEL_CHAIN", "").strip()
             if chain_raw:
@@ -4763,15 +4761,15 @@ class Pipeline:
                     hm = self._heart_chain[self._heart_chain_idx]
                     if ":" in hm:
                         hm_provider, hm_model = hm.split(":", 1)
-                        if hm_provider.lower() == "kie" and self._kie_api_key:
-                            model_name = hm_model
-                            current_client = self._get_kie_client(hm_model)
-                        elif hm_provider.lower() == "openai" and self.openai_client:
-                            model_name = hm_model
-                            current_client = self.openai_client
+                        hm_provider = hm_provider.lower().strip()
                     else:
-                        model_name = hm
-                    logger.info(f"   ✍️ Heart → [{self._heart_chain_idx + 1}/{len(self._heart_chain)}] {model_name}")
+                        hm_provider, hm_model = "deepseek", hm
+
+                    # Через override — маршрутизируется по существующему пути
+                    override_provider = hm_provider
+                    override_model = hm_model
+                    logger.info(f"   ✍️ Heart → [{self._heart_chain_idx + 1}/{len(self._heart_chain)}] "
+                                f"{hm_provider}:{hm_model}")
 
         is_external_reviewer_kie = False
         if override_provider:
