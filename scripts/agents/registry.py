@@ -73,7 +73,7 @@ class AgentConfig:
 MODELS: Dict[str, str] = {
     # DeepSeek — основной провайдер генерации текста
     "deepseek_pro":   os.getenv("MODEL_DEEPSEEK_PRO",   "deepseek-v4-pro"),
-    "deepseek_flash": os.getenv("MODEL_DEEPSEEK_FLASH", "deepseek-v4-flash"),
+    "deepseek_flash": os.getenv("MODEL_DEEPSEEK_FLASH", "deepseek-flash"),
     # Внешний ревизор для QUALITY_MODE: Gemini 3.8 Flash через KIE per-model
     # шлюз (api.kie.ai/gemini-3-8-flash-openai/v1 — _get_kie_client строит URL
     # из имени). Модель НЕСТАБИЛЬНАЯ: ~50% запросов отдают internal error,
