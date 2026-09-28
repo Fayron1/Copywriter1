@@ -4888,11 +4888,45 @@ class Pipeline:
                     model_name = MODELS["deepseek_pro"]
                     chat_params["model"] = model_name
                     is_o1_o3 = any(m in model_name.lower() for m in ["o1-", "o3-"])
-                    # Adjust parameters for DeepSeek
                     if "max_completion_tokens" in chat_params:
                         chat_params.pop("max_completion_tokens")
                     attempt += 1
                     continue
+                elif agent_id == "heart" and getattr(self, "_heart_chain", None):
+                    # ── HEART CHAIN FALLBACK: Claude пустой/500 → следующая модель ──
+                    chain = self._heart_chain
+                    idx = getattr(self, "_heart_chain_idx", 0)
+                    if idx < len(chain) - 1:
+                        next_idx = idx + 1
+                        next_entry = chain[next_idx]
+                        self._heart_chain_idx = next_idx
+                        if ":" in next_entry:
+                            np, nm = next_entry.split(":", 1)
+                        else:
+                            np, nm = "deepseek", next_entry
+                        logger.warning(
+                            f"   🔄 Heart: модель [{idx+1}] ошибка ({str(e)[:60]}) "
+                            f"→ переключаюсь на [{next_idx+1}] {np}:{nm}")
+                        # Обновляем клиент и модель
+                        if np.lower() == "kie" and self._kie_api_key:
+                            current_client = self._get_kie_client(nm)
+                        else:
+                            current_client = self.deepseek_client
+                            np = "deepseek"
+                        chat_params["model"] = nm
+                        # Gemini array-content transform
+                        if "gemini-3-8" in nm:
+                            for m in chat_params.get("messages", []):
+                                if isinstance(m.get("content"), str):
+                                    m["content"] = [{"type": "text", "text": m["content"]}]
+                        attempt += 1
+                        continue
+                    else:
+                        logger.warning(f"   ⚠️ Heart: цепочка исчерпана, деградирую до DeepSeek Pro")
+                        current_client = self.deepseek_client
+                        chat_params["model"] = MODELS["deepseek_pro"]
+                        attempt += 1
+                        continue
                 else:
                     raise
             
