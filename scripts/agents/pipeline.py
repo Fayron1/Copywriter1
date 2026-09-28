@@ -3907,13 +3907,31 @@ class Pipeline:
         return ""
 
     def _step_booster(self, state: PipelineState):
-        """Шаг 8: Booster — SEO/GEO оптимизация."""
+        """Шаг 8: Booster — SEO/GEO оптимизация. Метаданные проходят через Coverage Audit."""
         logger.info("🚀 [8/9] Booster: SEO/GEO оптимизация...")
+        
+        # Claim pack для метаданных: booster получает те же утверждённые факты
+        claim_pack_block = ""
+        _np = getattr(state, "norm_params", None)
+        if _np:
+            try:
+                from .norm_params import format_params_block
+                import datetime
+                blk = format_params_block(_np, datetime.datetime.now().year)
+                if blk:
+                    claim_pack_block = (
+                        blk + "\n\n"
+                        "ЗАПРЕЩЕНО в title, description и метаданных: использовать значения, "
+                        "помеченные как устаревшие, или цифры не из списка выше.\n\n"
+                    )
+            except Exception:
+                pass
         
         user_msg = (
             f"ТЕМА СТАТЬИ: {state.topic}\n"
             f"ТИП СТАТЬИ: {state.article_type}\n"
             f"НАПРАВЛЕНИЕ: {state.direction}\n\n"
+            f"{claim_pack_block}"
             f"ЧЕРНОВИК СТАТЬИ:\n{state.draft}\n\n"
             f"- Твой БЮДЖЕТ на SEO-добавки: ровно {state.seo_budget} символов. Это всё, что ты можешь добавить.\n"
             f"- Citation Bait: {'подготовь ОДНУ наживку (40-50 слов) на всю статью (компактный режим).' if getattr(state, 'compact_mode', False) else 'подготовь по одной наживке (40-50 слов) на каждый раздел H2.'}\n"
