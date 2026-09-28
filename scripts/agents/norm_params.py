@@ -713,6 +713,21 @@ _DRAMATIC = re.compile(
     r"год\s+слепых\s+расходов|точка\s+невозврата)", re.I)
 
 
+# Конструкция «X, а не X» — одинаковые значения в противопоставлении
+_SAME_VALUE_CONTRAST = re.compile(
+    r"(\d+[.,]?\d*\s*(?:%|млн|руб|₽)?)\s*(?:,\s*а\s+не|—\s*не)\s+(\d+[.,]?\d*\s*(?:%|млн|руб|₽)?)", re.I)
+
+
+def _check_same_contrast(text: str) -> Optional[str]:
+    """Найти «X, а не X» — когда модель вставила одинаковые значения."""
+    for m in _SAME_VALUE_CONTRAST.finditer(text):
+        left = m.group(1).strip().replace(" ", "").replace(",", ".")
+        right = m.group(2).strip().replace(" ", "").replace(",", ".")
+        if left == right:
+            return m.group(0)
+    return None
+
+
 def lint_legal(text: str) -> List[str]:
     """Оборванные ссылки, абсолюты без источника, псевдо-практика, формы без оговорки,
     заглушки статей, псевдо-экспертность, неподтверждённые цены."""
@@ -769,6 +784,11 @@ def lint_legal(text: str) -> List[str]:
         issues.append(f"🟡 БЕНЧМАРК БЕЗ ИСТОЧНИКА: «{frag}» — рыночная цифра "
                       f"без исследования. Уберите или маркируйте как "
                       f"«ориентир для тестового планирования»")
+    # Противопоставление с одинаковыми значениями («22%, а не 22%»)
+    same = _check_same_contrast(text)
+    if same:
+        issues.append(f"🔴 ОДИНАКОВЫЕ ЗНАЧЕНИЯ В ПРОТИВОПОСТАВЛЕНИИ: «{same}» — "
+                      f"проверьте цифры. Например «22%, а не 22%» должно быть «22%, а не 20%»")
     # Рыночные цифры без источника (кейс: «65,8 трлн ₽» — 2026-09-28)
     for m in list(_MARKET_SIZE_NO_SRC.finditer(text))[:2]:
         frag = text[max(0, m.start() - 15):m.end() + 20].replace("\n", " ")
