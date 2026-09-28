@@ -258,22 +258,32 @@ def calc_comparison(
     year: int = 2026,
 ) -> List[ScenarioResult]:
     """
-    Полное сравнение 4 сценариев (УСН 5% / УСН 7% / УСН 22% с вычетами / ОСНО).
-    Это то, что Heart обязан показать в статье «УСН или ОСНО».
+    Полное сравнение сценариев. УСН 7% включается ТОЛЬКО при доходе > 272,5 млн
+    (иначе для компании с 120 млн это неприменимый выбор — кейс редактора).
     """
     P = PARAMS_2026
     results = []
 
-    # УСН 5%
+    # УСН 5% — применимо при доходе 20 млн — 272,5 млн
     results.append(calc_scenario(ScenarioInput(
         name="УСН + НДС 5% (без вычетов)", legal_form=legal_form, regime="USN",
         vat_method="special_5", revenue_ex_vat=revenue, purchases_ex_vat=purchases,
         includes_vat=includes_vat, usn_object=usn_object, payroll=payroll, year=year)))
-    # УСН 7%
-    results.append(calc_scenario(ScenarioInput(
-        name="УСН + НДС 7% (без вычетов)", legal_form=legal_form, regime="USN",
-        vat_method="special_7", revenue_ex_vat=revenue, purchases_ex_vat=purchases,
-        includes_vat=includes_vat, usn_object=usn_object, payroll=payroll, year=year)))
+
+    # УСН 7% — только если выручка > порога спецставки 5% (272,5 млн)
+    if revenue > P["vat_threshold_special_1"]:
+        results.append(calc_scenario(ScenarioInput(
+            name="УСН + НДС 7% (без вычетов)", legal_form=legal_form, regime="USN",
+            vat_method="special_7", revenue_ex_vat=revenue, purchases_ex_vat=purchases,
+            includes_vat=includes_vat, usn_object=usn_object, payroll=payroll, year=year)))
+    else:
+        # Помечаем как неприменимый для этого уровня дохода
+        r7 = ScenarioResult(name="УСН + НДС 7%", regime="USN", vat_method="special_7")
+        r7.ok = False
+        r7.error = (f"неприменимо при доходе {revenue:,.0f} ₽ (ставка 7% действует "
+                    f"после превышения {P['vat_threshold_special_1']:,.0f} ₽)")
+        results.append(r7)
+
     # УСН + общая ставка с вычетами
     results.append(calc_scenario(ScenarioInput(
         name="УСН + НДС 22% с вычетами", legal_form=legal_form, regime="USN",
@@ -328,6 +338,11 @@ def format_for_heart(results: List[ScenarioResult]) -> str:
         lines.append(f"ИТОГ: минимальная нагрузка — {best.name} ({best.total_burden:,.0f} ₽, "
                      f"{best.effective_rate*100:.1f}% от выручки). Но решение зависит от доли "
                      f"B2B-клиентов (им важен входной НДС) и структуры закупок.")
+    # Помечаем неприменимые сценарии
+    for r in results:
+        if not r.ok and r.error and "неприменимо" in r.error:
+            lines.append(f"\n⚠️ {r.name}: {r.error}. Не включай в основное сравнение для этого кейса — "
+                         f"вынеси в отдельный блок «что изменится при росте выручки».")
     lines.append("=== КОНЕЦ РАСЧЁТА ===")
     return "\n".join(lines)
 

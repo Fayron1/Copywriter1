@@ -653,6 +653,11 @@ def detect_truncation(text: str) -> List[str]:
     return issues
 
 
+_UNVERIFIED_HEURISTIC = re.compile(
+    r"(?:если|когда|при)\s+дол[яеи]\s+[^.]{0,30}(?:меньше|менее|ниже|выше|более)\s*(\d{2,3})\s*%"
+    r"|(?:если|когда|при)\s+дол[яеи]\s+клиент\w*\s+[^.]{0,30}(?:выше|более)\s*(\d{2,3})\s*%", re.I)
+
+
 def lint_legal(text: str) -> List[str]:
     """Оборванные ссылки, абсолюты без источника, псевдо-практика, формы без оговорки,
     заглушки статей, псевдо-экспертность, неподтверждённые цены."""
@@ -696,6 +701,12 @@ def lint_legal(text: str) -> List[str]:
     for m in list(_INCOMPLETE_CITATION.finditer(text))[:2]:
         frag = text[max(0, m.start() - 10):m.end() + 30].replace("\n", " ")
         issues.append(f"🟡 НЕПОЛНАЯ ССЫЛКА: «{frag}» — укажите ведомство, дату и название акта")
+    # Неподтверждённые эвристики («если доля клиентов выше 70%, то…»)
+    for m in list(_UNVERIFIED_HEURISTIC.finditer(text))[:2]:
+        frag = text[max(0, m.start() - 15):m.end() + 40].replace("\n", " ")
+        issues.append(f"🟡 ЭВРИСТИКА БЕЗ МЕТОДИКИ: «{frag}» — пороговые проценты для "
+                      f"бизнес-решений без исследования. Замените качественной матрицей "
+                      f"(низкая/средняя/высокая доля) или укажите источник.")
     for m in list(_FORM_RE.finditer(text))[:3]:
         window = text[max(0, m.start() - 80):m.end() + 80].lower()
         if "актуальн" not in window and "проверьт" not in window:
