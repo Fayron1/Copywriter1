@@ -1893,7 +1893,68 @@ class Pipeline:
             logger.warning(f"⚠️ [references] сборка источников пропущена из-за ошибки: {e}")
 
     def _evaluate_draft_score(self, state: PipelineState, draft: str) -> dict:
-        """Оценка черновика внешним ревизором (Turing Score и детальный вердикт)."""
+        """Оценка черновика: внешний ревизор + Red Team (adversarial audit).
+
+        Два разных вопроса:
+        - Ревизор: «насколько хороша статья?» (editorial score)
+        - Red Team: «почему её НЕЛЬЗЯ публиковать?» (adversarial verdict)
+
+        Ключевое отличие: Red Team НЕ получает стиль, желаемые выводы и промпт Heart.
+        Он видит только текст, контекст темы и обязан найти основания для отказа.
+        """
+        # === RED TEAM AUDIT (adversarial — запускаем ПЕРВЫМ) ===
+        red_team_verdict = {}
+        try:
+            red_team_sys = (
+                "Ты — Red Team Auditor. Твоя задача — ДОКАЗАТЬ, что статья не должна "
+                "быть опубликована. Ты не редактор и не автор.\n\n"
+                "Проверь:\n"
+                "1. Неверные факты, цифры, ставки, сроки, лимиты\n"
+                "2. Смешение годов, статусов, режимов, категорий\n"
+                "3. Выводы, не следующие из приведённых данных\n"
+                "4. Коммерческие допущения, выданные за универсальные факты\n"
+                "5. Цифры без формулы и исходных данных\n"
+                "6. Псевдо-кейсы и выдуманный опыт автора\n"
+                "7. Противоречия внутри текста\n"
+                "8. Утверждения без источника, поданные как нормы\n\n"
+                "Верни JSON: {\n"
+                "  \"publish_allowed\": true|false,\n"
+                "  \"critical_errors\": [{\"quote\": \"...\", \"reason\": \"...\"}],\n"
+                "  \"semantic_errors\": [{\"quote\": \"...\", \"what_mixed\": \"...\"}],\n"
+                "  \"unsupported_claims\": [{\"quote\": \"...\", \"needed\": \"...\"}],\n"
+                "  \"insufficient_evidence\": [{\"topic\": \"...\", \"action\": \"...\"}],\n"
+                "  \"trust_score\": 0-100\n"
+                "}\n"
+                "Если статья надёжна — publish_allowed: true и пустые списки. "
+                "Но твоя роль — искать проблемы, а не подтверждать качество."
+            )
+            red_user = (
+                f"ТЕМА: {state.topic}\n"
+                f"ГОД/КОНТЕКСТ: {getattr(state, 'article_year', 2026)}\n\n"
+                f"ТЕКСТ СТАТЬИ:\n{draft[:12000]}\n\n"
+                f"Найди все основания отклонить эту статью."
+            )
+            red_result = self._call_agent(
+                "external_reviewer", red_user,
+                parse_json=True, state=state)
+            if isinstance(red_result, dict):
+                red_team_verdict = red_result
+                rt_allowed = red_result.get("publish_allowed")
+                rt_errors = red_result.get("critical_errors", [])
+                rt_trust = red_result.get("trust_score", 100)
+                if rt_allowed is False or rt_errors:
+                    logger.warning(f"   🔴 RED TEAM: публикация ОТКЛОНЕНА "
+                                   f"(trust: {rt_trust}, критических: {len(rt_errors)})")
+                    for err in (rt_errors or [])[:4]:
+                        if isinstance(err, dict):
+                            logger.warning(f"      • {err.get('reason', '?')[:80]}: "
+                                          f"«{err.get('quote', '?')[:60]}»")
+                else:
+                    logger.info(f"   ✅ RED TEAM: публикация разрешена (trust: {rt_trust})")
+        except Exception as e:
+            logger.warning(f"   ⚠️ Red Team аудит пропущен: {e}")
+
+        # === ОБЫЧНЫЙ РЕВИЗОР (editorial score) ===
         # Сущностный аудит: для строгих тем ревизор получает паспорт параметров
         # и матрицу сценариев — проверяет не стиль, а применимость норм.
         entity_audit_block = ""
