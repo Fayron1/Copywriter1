@@ -16,6 +16,8 @@ Virality Engine — генерация и выбор заголовков по �
 from __future__ import annotations
 
 import logging
+import os
+import re
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("agents.virality")
@@ -197,7 +199,42 @@ def pick_best_headline(
                     logger.info(f"Virality: Jev выбрал «{variants[idx]['headline'][:60]}»")
                     return variants[idx]
         except Exception as e:
-            logger.warning(f"Virality: Jev недоступен ({e}), использую скоринг")
+            logger.warning(f"Virality: Jev недоступен ({e}), пробую DeepSeek")
+
+    # DeepSeek Flash (fallback: понимает контекст, дешевле Jev)
+    try:
+        from openai import OpenAI
+        ds_client = OpenAI(
+            api_key=os.getenv("DEEPSEEK_API_KEY", ""),
+            base_url=os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com/v1"),
+            timeout=30.0,
+        )
+        headlines_text = "\n".join(
+            f"{i+1}. {v['headline']} (критерий: {v['criterion']})"
+            for i, v in enumerate(variants))
+        resp = ds_client.chat.completions.create(
+            model=os.getenv("MODEL_DEEPSEEK_FLASH", "deepseek-flash"),
+            messages=[
+                {"role": "system", "content": (
+                    "Ты — редактор B2B-издания. Выбери заголовок, который вызовет больше всего "
+                    "кликов у владельца малого бизнеса в России. Учитывай: боль, конкретику, "
+                    "цифры, страх потери. Верни ТОЛЬКО номер варианта (1, 2, 3...)."
+                )},
+                {"role": "user", "content": f"Варианты заголовков:\n{headlines_text}\n\nНомер лучшего:"},
+            ],
+            temperature=0.1, max_tokens=100, timeout=30.0,
+        )
+        answer = (resp.choices[0].message.content or "").strip()
+        # Парсим номер
+        num_match = re.search(r'\d+', answer)
+        if num_match:
+            idx = int(num_match.group()) - 1
+            if 0 <= idx < len(variants):
+                variants[idx]["selected_by"] = "deepseek"
+                logger.info(f"Virality: DeepSeek выбрал «{variants[idx]['headline'][:60]}»")
+                return variants[idx]
+    except Exception as e:
+        logger.warning(f"Virality: DeepSeek выбор сбой ({e}), использую скоринг")
 
     # Детерминированный выбор: максимальный final_score
     best = max(variants, key=lambda x: x.get("final_score", 0))
