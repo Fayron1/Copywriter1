@@ -732,6 +732,16 @@ class Pipeline:
                             state.final_article = tbl_text
                             state.draft = tbl_text
                             logger.info(f"   🔧 Markdown-таблицы: исправлено разделителей: {tbl_fixes}")
+                        # 0.5. Исправление Содержания: автогенерация из H2 если пустое
+                        try:
+                            from .norm_params import fix_table_of_contents
+                            toc_text, toc_fixed = fix_table_of_contents(state.final_article or "")
+                            if toc_fixed:
+                                state.final_article = toc_text
+                                state.draft = toc_text
+                                logger.info("   🔧 Содержание: сгенерирован маркированный список из H2-заголовков")
+                        except Exception:
+                            pass
                         # 1. Детерминированные замены устаревших чисел
                         fixed_text, fixes = enforce_params(
                             state.final_article or "", _np,

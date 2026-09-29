@@ -742,6 +742,68 @@ _PROMPT_LEAK = re.compile(
     r"сгенерируй|напиши\s+текст|создай\s+статью)", re.I)
 
 
+def fix_table_of_contents(text: str) -> tuple:
+    """
+    Исправить блок «Содержание»: Heart иногда оставляет пустой заголовок
+    без списка, или генерирует H2 вместо маркированного списка.
+    Автоматически генерирует содержание из реальных H2-заголовков.
+    Возвращает (исправленный_текст, было_исправлено).
+    """
+    if not text or "## Содержание" not in text:
+        return text, False
+
+    lines = text.split('\n')
+    toc_idx = None
+    for i, line in enumerate(lines):
+        if line.strip() == '## Содержание':
+            toc_idx = i
+            break
+
+    if toc_idx is None:
+        return text, False
+
+    # Найти конец блока Содержание (следующий H2)
+    next_h2 = None
+    for i in range(toc_idx + 1, len(lines)):
+        if lines[i].strip().startswith('## ') and 'Содержание' not in lines[i]:
+            next_h2 = i
+            break
+
+    # Собрать все H2-заголовки (кроме «Содержание» и «Источники»)
+    h2_titles = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith('## ') and 'Содержание' not in stripped and 'Источник' not in stripped:
+            title = stripped.lstrip('# ').strip()
+            if title:
+                h2_titles.append(title)
+
+    if not h2_titles:
+        return text, False
+
+    # Проверить: есть ли маркированный список после «Содержание»
+    has_list = False
+    if next_h2:
+        for i in range(toc_idx + 1, next_h2):
+            if lines[i].strip().startswith('- ') or lines[i].strip().startswith('* '):
+                has_list = True
+                break
+
+    if has_list:
+        return text, False  # Список уже есть
+
+    # Сгенерировать маркированный список
+    toc_lines = ['## Содержание', '']
+    for title in h2_titles:
+        toc_lines.append(f'- {title}')
+    toc_lines.append('')
+
+    # Заменить блок от «## Содержание» до следующего H2
+    end = next_h2 if next_h2 else toc_idx + 1
+    new_lines = lines[:toc_idx] + toc_lines + lines[end:]
+    return '\n'.join(new_lines), True
+
+
 def lint_legal(text: str) -> List[str]:
     """Оборванные ссылки, абсолюты без источника, псевдо-практика, формы без оговорки,
     заглушки статей, псевдо-экспертность, неподтверждённые цены."""
