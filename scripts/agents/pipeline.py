@@ -995,14 +995,10 @@ class Pipeline:
         )
         state.facts = self._call_agent("fact_finder", user_msg, state=state)
 
-        # Постфильтр: отбрасываем факты с очень низкой надёжностью (secondary без URL).
-        # Это детерминированная защита от мусорных сниппетов до того, как они попадут в Heart.
-        self._filter_low_reliability_facts(state)
-
-        # ── EVIDENCE-FIRST: Claim Ledger ──
-        # 1. Извлечь атомарные утверждения из фактов
-        # 2. Отфильтровать (insufficient → исключены)
-        # 3. Собрать claim pack → Heart получает ТОЛЬКО approved факты
+        # ── EVIDENCE-FIRST: Claim Ledger (ДО фильтра — из ВСЕХ фактов) ──
+        # Claim Extractor работает с сырыми фактами ДО фильтрации, чтобы
+        # маркетинговые/HR темы (где факты имеют lower reliability) тоже
+        # попали в claim pack. Фильтрация quality — через claim status.
         try:
             from .claim_ledger import extract_claims, build_claim_pack, audit_coverage
             state.claims = extract_claims(state.facts, state.topic)
@@ -1010,8 +1006,16 @@ class Pipeline:
             if state.claim_pack:
                 logger.info(f"   📋 Claim Ledger: {len(state.claims)} утверждений, "
                             f"pack {len(state.claim_pack)} симв. для Heart")
+            else:
+                logger.info(f"   📋 Claim Ledger: 0 утверждений после фильтрации")
         except Exception as e:
             logger.warning(f"   ⚠️ Claim Ledger пропущен: {e}")
+            state.claims = []
+            state.claim_pack = ""
+
+        # Постфильтр: отбрасываем факты с очень низкой надёжностью (secondary без URL).
+        # Это детерминированная защита от мусорных сниппетов до того, как они попадут в Heart.
+        self._filter_low_reliability_facts(state)
 
         # Паспорт параметров «год x норма» (строгие темы): действующие пороги/ставки
         # на год статьи + чёрный список устаревших. Контроль конфликта версий —
