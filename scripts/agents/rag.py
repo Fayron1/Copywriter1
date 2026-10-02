@@ -167,14 +167,62 @@ def query_knowledge(
         search_filter = Filter(must=must_conditions) if must_conditions else None
 
         # Поиск
-        results = qdrant_client.query_points(
-            collection_name=agent.rag.collection,
-            query=query_vector,
-            query_filter=search_filter,
-            limit=agent.rag.top_k,
-            score_threshold=agent.rag.score_threshold,
-            with_payload=True,
-        )
+        # ГИБРИДНЫЙ ПОИСК (2026-10-02): dense e5 + sparse BM25-стиль, RRF.
+        # Проблема: dense размывает точные лексемы — «ч. 2 ст. 105» уплывает
+        # к «жалобам» вообще. Sparse-ветка ловит номера статей/законов
+        # дословно. Fallback: нет sparse-конфига у коллекции → чистый dense
+        # (старое поведение, прод не ломается).
+        _sparse_ok = True
+        try:
+            from kb2.sparse_utils import query_sparse as _q_sparse
+            from qdrant_client.models import FusionQuery, Prefetch, SparseVector
+        except ImportError:
+            _sparse_ok = False
+
+        if _sparse_ok:
+            try:
+                results = qdrant_client.query_points(
+                    collection_name=agent.rag.collection,
+                    prefetch=[
+                        Prefetch(query=query_vector, using="dense",
+                                 limit=max(agent.rag.top_k * 3, 30),
+                                 filter=search_filter,
+                                 score_threshold=agent.rag.score_threshold),
+                        Prefetch(
+                            query=SparseVector(**_q_sparse(query_text)),
+                            using="sparse",
+                            limit=max(agent.rag.top_k * 3, 30),
+                            filter=search_filter),
+                    ],
+                    query=FusionQuery(fusion="rrf"),
+                    limit=agent.rag.top_k,
+                    with_payload=True,
+                )
+            except Exception as _hyb_err:
+                logger.warning(f"RAG [{agent_id}]: гибрид недоступен "
+                               f"({_hyb_err}) — чистый dense")
+                _sparse_ok = False
+
+        if not _sparse_ok:
+            # named-коллекция требует using="dense"; старые unnamed — без using
+            try:
+                results = qdrant_client.query_points(
+                    collection_name=agent.rag.collection,
+                    query=query_vector, using="dense",
+                    query_filter=search_filter,
+                    limit=agent.rag.top_k,
+                    score_threshold=agent.rag.score_threshold,
+                    with_payload=True,
+                )
+            except Exception:
+                results = qdrant_client.query_points(
+                    collection_name=agent.rag.collection,
+                    query=query_vector,
+                    query_filter=search_filter,
+                    limit=agent.rag.top_k,
+                    score_threshold=agent.rag.score_threshold,
+                    with_payload=True,
+                )
 
         chunks = []
         for hit in results.points:

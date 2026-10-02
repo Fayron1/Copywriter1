@@ -44,6 +44,10 @@ from embedding_system.local_embeddings import embed, get_dim  # noqa: E402
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger("kb2.loader")
 
+# Гибридный поиск: sparse-ветка (BM25-стиль) рядом с dense e5
+from kb2.sparse_utils import sparse_vector as _sparse_of
+
+
 
 def _load_env() -> None:
     """Автономный запуск: подтянуть .env проекта (dotenv или ручной парсер)."""
@@ -334,11 +338,17 @@ def ensure_collection(client, recreate: bool = False) -> None:
         return
     except Exception:
         pass
+    from qdrant_client.models import SparseVectorParams, SparseIndexParams
     client.create_collection(
         collection_name=COLLECTION,
-        vectors_config=VectorParams(size=get_dim(), distance=Distance.COSINE),
+        vectors_config={"dense": VectorParams(size=get_dim(),
+                                              distance=Distance.COSINE)},
+        sparse_vectors_config={
+            "sparse": SparseVectorParams(
+                index=SparseIndexParams(on_disk=False))},
     )
-    logger.info(f"📦 Создана коллекция {COLLECTION} (dim={get_dim()}, локальные e5)")
+    logger.info(f"📦 Создана коллекция {COLLECTION} "
+                f"(dense dim={get_dim()} + sparse гибрид, локальные e5)")
 
 
 def upload(client, points: List[Dict[str, Any]]) -> int:
@@ -348,8 +358,16 @@ def upload(client, points: List[Dict[str, Any]]) -> int:
         batch = points[i:i + QDRANT_BATCH]
         for attempt in range(QDRANT_RETRIES):
             try:
+                from qdrant_client.models import SparseVector
                 client.upsert(collection_name=COLLECTION, points=[
-                    PointStruct(id=p["id"], vector=p["vector"], payload=p["payload"])
+                    PointStruct(
+                        id=p["id"],
+                        vector={
+                            "dense": p["vector"],
+                            "sparse": SparseVector(**_sparse_of(
+                                p.get("text") or p["payload"].get("text", ""))),
+                        },
+                        payload=p["payload"])
                     for p in batch
                 ])
                 uploaded += len(batch)
