@@ -348,6 +348,24 @@ AGENTS: Dict[str, AgentConfig] = {
         output_to=["heart"],
         rag=RagConfig(enabled=False),
     ),
+
+    # ───────────────────────────────────────────────
+    # 11. Упаковщик контент-пакета (The Packager)
+    # Дешёвая модель: meta description, FAQ, Telegram-посты, анонс.
+    # Работает поверх ФИНАЛЬНОЙ статьи; вывод проходит lint_legal.
+    # ───────────────────────────────────────────────
+    "packager": AgentConfig(
+        id="packager",
+        name="The Packager",
+        label="📦 Упаковщик",
+        model=MODELS["deepseek_flash"],
+        temperature=0.4,
+        max_tokens=4000,
+        description="Собирает контент-пакет: meta, FAQ, Telegram-посты, анонс.",
+        input_from=["booster"],
+        output_to=["publisher"],
+        rag=RagConfig(enabled=False),
+    ),
 }
 
 

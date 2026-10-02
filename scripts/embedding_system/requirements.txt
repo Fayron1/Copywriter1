@@ -1,0 +1,3 @@
+# Локальные эмбеддинги (замена OpenAI text-embedding-3-large)
+# Torch ставится автоматически (CPU-версия достаточна для e5-base)
+sentence-transformers>=3.0.0

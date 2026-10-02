@@ -319,6 +319,8 @@ class PipelineState:
     final_meta: Dict = field(default_factory=dict)
     humanize_report: Dict = field(default_factory=dict)  # отчёт статистической хуманизации
     best_of_summary: str = ""
+    # Контент-пакет поставки: seo_title, meta, FAQ, TG-посты, паспорт источников
+    content_package: Dict = field(default_factory=dict)
 
     # Статус
     status: str = "pending"  # pending / running / completed / failed / budget_exhausted
@@ -798,6 +800,61 @@ class Pipeline:
                                 logger.warning(f"   {issue}")
                         except Exception:
                             pass
+                        # ── ВОЛНА 1: math-валидатор + чекер противоречий ──
+                        try:
+                            from .math_validator import validate_math
+                            for issue in validate_math(state.final_article or ""):
+                                validation_warnings.append(issue)
+                                logger.warning(f"   {issue}")
+                        except Exception as e:
+                            logger.warning(f"   ⚠️ math-валидатор пропущен: {e}")
+                        try:
+                            from .contradiction_checker import (
+                                check_h1_support, check_value_conflicts,
+                                check_norm_references)
+                            cp_nums = None
+                            if getattr(state, "claim_pack", None):
+                                import re as _re_cp
+                                cp_nums = set(_re_cp.sub(r"\s", "",
+                                                          state.claim_pack).split())
+                            for issue in check_h1_support(state.final_article or "",
+                                                          cp_nums):
+                                validation_warnings.append(issue)
+                                logger.warning(f"   {issue}")
+                            for issue in check_value_conflicts(state.final_article or ""):
+                                validation_warnings.append(issue)
+                                logger.warning(f"   {issue}")
+                            _support_txt = " ".join(
+                                filter(None, [
+                                    getattr(state, "claim_pack", "") or "",
+                                    str(getattr(state, "facts", "") or ""),
+                                    " ".join(r.get("url", "") + " " + r.get("title", "")
+                                             for r in (state.references or [])
+                                             if isinstance(r, dict)),
+                                    str(getattr(state, "norm_params", "") or "")]))
+                            for issue in check_norm_references(
+                                    state.final_article or "", _support_txt):
+                                validation_warnings.append(issue)
+                                logger.warning(f"   {issue}")
+                        except Exception as e:
+                            logger.warning(f"   ⚠️ чекер противоречий пропущен: {e}")
+                        # ── ВОЛНА 2: события/домены, обязательные сущности, HTML ──
+                        try:
+                            from .regulatory_events import check_event_domain
+                            for issue in check_event_domain(state.final_article or "",
+                                                            state.direction or ""):
+                                validation_warnings.append(issue)
+                                logger.warning(f"   {issue}")
+                        except Exception:
+                            pass
+                        try:
+                            from .html_and_entities import check_required_entities
+                            for issue in check_required_entities(state.final_article or "",
+                                                                 state.direction or ""):
+                                validation_warnings.append(issue)
+                                logger.warning(f"   {issue}")
+                        except Exception:
+                            pass
                     except Exception as e:
                         logger.warning(f"   ⚠️ Петля параметров пропущена: {e}")
 
@@ -821,6 +878,9 @@ class Pipeline:
 
                 # 7.5 Сборка блока «Источники» (2–5 естественных ссылок)
                 self._step_assemble_references(state)
+
+                # 7.6 Контент-пакет поставки: CTA + deliverables
+                self._step_deliverables(state)
             else:
                 logger.error(f"❌ Draft пустой ({len(state.draft or '')} символов) — пропускаем Booster")
                 state.final_article = state.draft or ""
@@ -902,7 +962,8 @@ class Pipeline:
         # Safety: Claude может вернуть dict/list вместо строки
         if not isinstance(task, str):
             task = json.dumps(task, ensure_ascii=False) if isinstance(task, (dict, list)) else str(task)
-        chunks = query_knowledge(task, "fact_finder", self.qdrant)
+        chunks = query_knowledge(task, "fact_finder", self.qdrant,
+                                 direction=getattr(state, "direction", "") or "")
         rag_context = format_rag_context(chunks)
 
         # Резервный веб-поиск в QUALITY_MODE при нехватке RAG-фактов
@@ -994,6 +1055,32 @@ class Pipeline:
             f"в чанках БЗ, помечай как secondary с URL (см. правило ВНЕШНИЙ БРИФИНГ)."
         )
         state.facts = self._call_agent("fact_finder", user_msg, state=state)
+
+        # ── ГВАРД ПУСТЫХ ФАКТОВ (кейс 16: обрыв → 0 фактов → статья вслепую) ──
+        # Evidence-first без фактов — не evidence-first. Один ретрай с явным
+        # требованием компактности; если снова пусто — пайплайн не идёт дальше.
+        def _facts_count(f) -> int:
+            if isinstance(f, dict):
+                fl = f.get("facts")
+                return len(fl) if isinstance(fl, list) else 0
+            if isinstance(f, list):
+                return len(f)
+            return 0
+
+        if _facts_count(state.facts) == 0:
+            logger.warning("   🔴 Fact-Finder вернул 0 фактов — ретрай с компактным форматом")
+            retry_msg = (
+                user_msg
+                + "\n\nВАЖНО: предыдущий ответ оборвался по лимиту токенов. "
+                  "Верни НЕ БОЛЕЕ 20 ключевых фактов, каждый — одной строкой, "
+                  "без развёрнутых пояснений. Строгий JSON."
+            )
+            state.facts = self._call_agent("fact_finder", retry_msg, state=state)
+            if _facts_count(state.facts) == 0:
+                state.status = "failed"
+                state.error = "Fact-Finder дважды вернул 0 фактов — статья без факт-слоя не пишется"
+                logger.error("   ❌ " + state.error)
+                raise RuntimeError(state.error)
 
         # ── EVIDENCE-FIRST: Claim Ledger (ДО фильтра — из ВСЕХ фактов) ──
         # Claim Extractor работает с сырыми фактами ДО фильтрации, чтобы
@@ -1479,7 +1566,15 @@ class Pipeline:
             topic_l = (state.topic or "").lower()
             _calc_triggers = ["усн", "осно", "ндс", "сравни", "выбор режима", "переход",
                               "точка", "выгоднее", "нагрузк", "юнит", "экономика"]
-            if any(t in topic_l for t in _calc_triggers) and self._is_strict_topic(state.topic, state.description):
+            # Ревью 25v2 (2026-10-02): в юнит-статьях маркетплейсов налог —
+            # ПАРАМЕТР модели (одна строка УСН), а не сравнительная таблица
+            # режимов: ОСНО-строка калькулятора тянула в P&L необъяснимые
+            # 4,682 млн. Сравнение режимов — тема отдельных статей.
+            from .marketplace_calculator import is_marketplace_topic as _is_mkt
+            _tax_ok = not _is_mkt(state.topic, state.description) or \
+                any(t in topic_l for t in ("выбор режима", "сравни", "осно"))
+            if any(t in topic_l for t in _calc_triggers) and _tax_ok \
+                    and self._is_strict_topic(state.topic, state.description):
                 from .tax_calculator import calc_comparison, format_for_heart
                 # Входные данные: из темы/ТЗ или дефолтный кейс (120 млн, закупки 78 млн)
                 rev_m = _re.search(r'(\d{2,4})\s*(?:млн)', topic_l + " " + (state.description or "").lower())
@@ -1492,6 +1587,48 @@ class Pipeline:
                             "таблица передана Heart")
         except Exception as e:
             logger.warning(f"   ⚠️ Налоговый калькулятор пропущен: {e}")
+
+        # P&L-КАЛЬКУЛЯТОР МАРКЕТПЛЕЙСОВ: тот же паттерн для селлерских тем.
+        # Допущения маркируются как условные — тарифы площадок волатильны.
+        try:
+            from .marketplace_calculator import (is_marketplace_topic,
+                                                 calc_unit_economics, DEMO,
+                                                 build_heart_block)
+            if is_marketplace_topic(state.topic, state.description):
+                calc_block += build_heart_block(calc_unit_economics(DEMO)) + "\n\n"
+                logger.info("   🧮 P&L-калькулятор маркетплейса: юнит-экономика "
+                            "рассчитана (демо-допущения), объект передан Heart")
+        except Exception as e:
+            logger.warning(f"   ⚠️ P&L-калькулятор пропущен: {e}")
+
+        # КАЛЬКУЛЯТОР ОБЕСПЕЧЕНИЙ 44-ФЗ: заявка/контракт/антидемпинг
+        # детерминированно (ст. 44, 96, 37; снимок 2026-09-29).
+        try:
+            from .procurement_calculator import (is_procurement_topic,
+                                                 calc_security, DEMO,
+                                                 build_heart_block as _phb)
+            if is_procurement_topic(state.topic, state.description):
+                calc_block += _phb(calc_security(DEMO)) + "\n\n"
+                logger.info("   🧮 Калькулятор 44-ФЗ: обеспечения и "
+                            "антидемпинг рассчитаны (демо-допущения), "
+                            "объект передан Heart")
+        except Exception as e:
+            logger.warning(f"   ⚠️ Калькулятор 44-ФЗ пропущен: {e}")
+
+        # КАЛЬКУЛЯТОР НЕУСТОЙКИ: пени/штрафы по ПП № 1042 + ст. 34 44-ФЗ.
+        # Отдельный триггер: неустойка бывает темой без обеспечений.
+        try:
+            _pen_triggers = ("пен", "штраф", "неустойк", "просрочк")
+            _tl2 = (state.topic + " " + (state.description or "")).lower()
+            if any(t in _tl2 for t in _pen_triggers) and \
+                    is_procurement_topic(state.topic, state.description):
+                from .procurement_calculator import (calc_penalties, DEMO_PEN,
+                                                     build_penalty_block)
+                calc_block += build_penalty_block(calc_penalties(DEMO_PEN)) + "\n\n"
+                logger.info("   🧮 Калькулятор неустойки: пени и штрафы "
+                            "рассчитаны (демо-допущения), объект передан Heart")
+        except Exception as e:
+            logger.warning(f"   ⚠️ Калькулятор неустойки пропущен: {e}")
 
         # ЗАФИКСИРОВАННЫЕ ПАРАМЕТРЫ (год x норма) — закон для писателя:
         # старее года статьи значения запрещены, отклонение = брак.
@@ -1647,8 +1784,20 @@ class Pipeline:
             if not draft or len(draft) < 200:
                 return
 
-            # Фаза 1: извлечение утверждений
-            claims = _factcheck.extract_claims(draft)
+            # Фаза 1: извлечение утверждений.
+            # KIE-экстрактор нестабилен (статьи 17–18: 0 утверждений при живом
+            # тексте) — сначала детерминированный регекс, KIE как дополнение.
+            claims = []
+            try:
+                from .draft_claim_extractor import extract_claims_deterministic
+                claims = extract_claims_deterministic(draft)
+                if claims:
+                    logger.info(f"   🔍 [factcheck] детерминированно извлечено "
+                                f"утверждений: {len(claims)}")
+            except Exception as e:
+                logger.warning(f"   ⚠️ детерминированный экстрактор сбой: {e}")
+            if not claims:
+                claims = _factcheck.extract_claims(draft)
             if not claims:
                 logger.info("   ℹ️ [factcheck] Claim Extractor: проверяемых утверждений не найдено.")
                 state.steps_completed.append("claim_check")
@@ -1895,6 +2044,18 @@ class Pipeline:
                 state.steps_completed.append("references")
                 return
 
+            # Фильтр технических redirect/поисковых URL (ревью статьи 15):
+            # поисковые редиректы — не первичный источник
+            import re as _re_ref
+            _BAD_URL = _re_ref.compile(
+                r"google\.\w+/url\?|yandex\.(ru|com)/clck|go\.mail\.ru/redirect|"
+                r"bing\.com/ck|/search\?|duckduckgo\.com/l\?", re.I)
+            _before = len(pool)
+            pool = {u: i for u, i in pool.items() if not _BAD_URL.search(u)}
+            if len(pool) < _before:
+                logger.info(f"   🔧 [references] отфильтровано redirect-URL: "
+                            f"{_before - len(pool)}")
+
             # Ранжирование по авторитетности, дедуп по домену (берём лучший)
             seen_domains: Dict[str, str] = {}  # domain → url
             for url, info in sorted(pool.items(), key=lambda x: x[1].get("authority", 0), reverse=True):
@@ -1939,6 +2100,90 @@ class Pipeline:
             state.steps_completed.append("references")
         except Exception as e:
             logger.warning(f"⚠️ [references] сборка источников пропущена из-за ошибки: {e}")
+
+    def _step_deliverables(self, state: PipelineState):
+        """Шаг 7.6: контент-пакет поставки + детерминированный CTA.
+
+        - CTA вклеивается кодом в конец статьи (режим CTA_MODE:
+          self_promo — свой блог, editorial — чистый финал для клиента).
+        - Пакет: seo_title, meta, FAQ, 3 TG-поста, анонс, паспорт
+          источников, допущения. LLM-части — packager (deepseek-flash),
+          вывод проходит lint_legal.
+        - Пакет сохраняется в output_dir/content_package.md.
+        """
+        import os as _os
+        from .deliverables import (build_content_package, package_to_markdown,
+                                   TIER_BY_DIRECTION, build_expert_signoff)
+        from .cta_renderer import append_cta
+
+        cta_mode = _os.getenv("CTA_MODE", "self_promo")
+        try:
+            before = len(state.final_article or "")
+            state.final_article = append_cta(
+                state.final_article or "", state.direction, cta_mode,
+                topic_hint=state.topic)
+            if cta_mode == "self_promo" and len(state.final_article) > before:
+                logger.info("   ✅ [deliverables] CTA-блок добавлен в конец статьи")
+
+            def _llm(prompt: str) -> str:
+                return self._call_agent("packager", prompt, state=state, parse_json=False)
+
+            state.content_package = build_content_package(
+                article=state.final_article or "",
+                topic=state.topic,
+                direction=state.direction,
+                claims=getattr(state, "claims", None),
+                references=state.references,
+                article_year=getattr(state, "article_year", 2026) or 2026,
+                llm_call=_llm,
+                cta_mode=cta_mode,
+            )
+            # ── Green/Yellow/Red: уровень домена + red-файлы поставки ──
+            tier = TIER_BY_DIRECTION.get((state.direction or "").strip().lower(), "yellow")
+            state.content_package["tier"] = tier
+            logger.info(f"   🚦 [deliverables] уровень домена: {tier.upper()}")
+            if state.output_dir and tier == "red":
+                try:
+                    from pathlib import Path as _P2
+                    _d = _P2(state.output_dir)
+                    _d.mkdir(parents=True, exist_ok=True)
+                    (_d / "expert_signoff_checklist.md").write_text(
+                        build_expert_signoff(state.content_package), encoding="utf-8")
+                    if getattr(state, "claims", None):
+                        import csv as _csv, io as _io
+                        buf = _io.StringIO()
+                        w = _csv.writer(buf)
+                        w.writerow(["claim_id", "claim", "type", "risk", "status",
+                                    "source", "limitations"])
+                        for c in state.claims:
+                            w.writerow([c.get("claim_id", ""), c.get("claim", "")[:200],
+                                        c.get("claim_type", ""), c.get("risk", ""),
+                                        c.get("status", ""), c.get("source", ""),
+                                        c.get("limitations", "")])
+                        (_d / "claim_ledger.csv").write_text(
+                            buf.getvalue(), encoding="utf-8")
+                    logger.info("   ✅ [deliverables] red-файлы: signoff + claim_ledger.csv")
+                except Exception as e:
+                    logger.warning(f"⚠️ [deliverables] red-файлы не записаны: {e}")
+            n_tg = len(state.content_package.get("telegram_posts", []))
+            n_faq = len(state.content_package.get("faq", []))
+            logger.info(f"   ✅ [deliverables] пакет собран: FAQ {n_faq}, "
+                        f"TG-посты {n_tg}, meta "
+                        f"{len(state.content_package.get('meta_description', ''))} зн.")
+
+            if state.output_dir:
+                try:
+                    from pathlib import Path as _P
+                    pkg_path = _P(state.output_dir) / "content_package.md"
+                    pkg_path.parent.mkdir(parents=True, exist_ok=True)
+                    pkg_path.write_text(
+                        package_to_markdown(state.content_package), encoding="utf-8")
+                    logger.info(f"   ✅ [deliverables] сохранён: {pkg_path}")
+                except Exception as e:
+                    logger.warning(f"⚠️ [deliverables] не сохранён файл пакета: {e}")
+            state.steps_completed.append("deliverables")
+        except Exception as e:
+            logger.warning(f"⚠️ [deliverables] пакет пропущен из-за ошибки: {e}")
 
     def _evaluate_draft_score(self, state: PipelineState, draft: str) -> dict:
         """Оценка черновика: внешний ревизор + Red Team (adversarial audit).
@@ -4928,10 +5173,13 @@ class Pipeline:
         if getattr(agent, "top_p", None) is not None:
             chat_params["top_p"] = agent.top_p
 
-        # Attempt API call with retry on length truncation
+        # Attempt API call with retry on length truncation.
+        # fact_finder получает полный корпус законов после фикса RAG
+        # (кейс статьи 24v3: 6000→12000 оба обрыва) — ему три попытки,
+        # чтобы добраться до проектного потолка 24k.
         response = None
         attempt = 0
-        max_attempts = 2
+        max_attempts = 3 if agent_id in ("fact_finder", "engineer") else 2
         
         while attempt < max_attempts:
             if is_o1_o3:
@@ -5006,7 +5254,11 @@ class Pipeline:
                     f"🔴 [{agent_id}] ОТВЕТ ОБОРВАН по лимиту токенов (finish_reason=length, max_tokens={max_tokens_for_call}). "
                     f"Попытка {attempt+1}/{max_attempts}: увеличиваем потолок и перезапрашиваем..."
                 )
-                max_tokens_for_call = min(int(max_tokens_for_call * 1.25), agent.max_tokens * 1.5 if agent.max_tokens * 1.5 <= 32000 else 32000)
+                # Fact-Finder пишет плотный JSON фактов: ×1.25 мало (кейс 16:
+                # 6000→7500 оба обрыва). Для факт-агентов шаг ×2, потолок 24k.
+                _step = 2.0 if agent_id in ("fact_finder", "engineer") else 1.25
+                _cap = 24000 if agent_id in ("fact_finder", "engineer") else 32000
+                max_tokens_for_call = min(int(max_tokens_for_call * _step), _cap)
             else:
                 logger.error(
                     f"🔴 [{agent_id}] Ретраи исчерпаны. Ответ по-прежнему оборван (finish_reason=length). "

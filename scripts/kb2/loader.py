@@ -110,6 +110,14 @@ FOLDERS: Dict[str, Dict[str, Any]] = {
         "agents": ["booster", "engineer"], "chunk": "book", "source_type": "book",
         "label": "📈 Маркетинг",
     },
+    "business/marketplaces": {
+        # Тарифные снимки, оферты и регламенты WB/Ozon: точечные факты для
+        # fact_finder (комиссии, КВВ, даты вступления) и engineer (P&L-модели).
+        # Отдельная папка, а не business/marketing: loader не пропускает уже
+        # залитые файлы, а в маркетинге лежат тяжёлые книги — пересчёт дорог.
+        "agents": ["fact_finder", "engineer"], "chunk": "guide", "source_type": "reference",
+        "label": "🛒 Маркетплейсы (тарифы и оферты)",
+    },
     "business/methodology": {
         "agents": ["engineer", "heart"], "chunk": "book", "source_type": "book",
         "label": "🧭 Методологии",
@@ -307,6 +315,14 @@ def get_client():
 def ensure_collection(client, recreate: bool = False) -> None:
     from qdrant_client.models import VectorParams, Distance
     if recreate:
+        # Автоснапшот перед сносом: --fresh необратим, а инцидент 2026-09-29
+        # стоил 80k точек. Снапшот остаётся на сервере Qdrant — восстановление
+        # через POST /collections/{name}/snapshots/upload.
+        try:
+            snap = client.create_snapshot(collection_name=COLLECTION)
+            logger.info(f"📸 Автоснапшот перед --fresh: {getattr(snap, 'name', snap)}")
+        except Exception as e:
+            logger.warning(f"⚠️ Автоснапшот не создан (продолжаем): {e}")
         try:
             client.delete_collection(COLLECTION)
             logger.info(f"🗑️ Коллекция {COLLECTION} удалена (--fresh)")
@@ -376,7 +392,7 @@ def prune_folder(client, folder_key: str, live_sources: List[str]) -> int:
 # ============================================================
 
 def process_folder(folder_key: str, dry_run: bool = False, limit: Optional[int] = None,
-                   client=None) -> Dict[str, int]:
+                   client=None, files_filter: Optional[str] = None) -> Dict[str, int]:
     cfg = FOLDERS[folder_key]
     folder = KB_ROOT / folder_key
     stats = {"files": 0, "chunks": 0, "uploaded": 0, "skipped": 0, "chars": 0}
@@ -388,6 +404,14 @@ def process_folder(folder_key: str, dry_run: bool = False, limit: Optional[int] 
 
     files = sorted(f for f in folder.iterdir()
                    if f.is_file() and f.suffix.lower() in SUPPORTED)
+    if files_filter:
+        # Точечная дозагрузка: glob-паттерн по имени файла (например
+        # «Минфин_письмо*»), чтобы не пересчитывать всю папку ради
+        # нескольких новых файлов. Prune при этом НЕ запускается.
+        import fnmatch
+        before = len(files)
+        files = [f for f in files if fnmatch.fnmatch(f.name, files_filter)]
+        logger.info(f"   фильтр --files '{files_filter}': {before} → {len(files)}")
     if limit:
         files = files[:limit]
     logger.info(f"   файлов: {len(files)}, стратегия чанков: {cfg['chunk']}")
@@ -456,8 +480,10 @@ def process_folder(folder_key: str, dry_run: bool = False, limit: Optional[int] 
         if (i // EMBED_BATCH) % 10 == 0:
             logger.info(f"   ⏳ залито {stats['uploaded']}/{len(pending_points)}")
 
-    # Чистка осиротевших точек (только полный прогон папки, без --limit)
-    if limit is None:
+    # Чистка осиротевших точек (только полный прогон папки, без --limit;
+    # при точечном --files prune ЗАПРЕЩЁН — live_sources строится из
+    # отфильтрованного списка и prune удалил бы точки остальных файлов)
+    if limit is None and files_filter is None:
         stats["pruned"] = prune_folder(client, folder_key, live_sources)
 
     return stats
@@ -482,6 +508,8 @@ def main() -> int:
     ap.add_argument("--fresh", action="store_true", help="пересоздать коллекцию")
     ap.add_argument("--dry-run", action="store_true", help="парсинг/чанкинг без заливки")
     ap.add_argument("--limit", type=int, default=None, help="максимум файлов на папку")
+    ap.add_argument("--files", default=None,
+                    help="точечная дозагрузка: glob-паттерн имён (например 'Минфин_письмо*')")
     ap.add_argument("--list", action="store_true", help="показать, что видит загрузчик")
     args = ap.parse_args()
 
@@ -500,7 +528,8 @@ def main() -> int:
     targets = list(FOLDERS.keys()) if args.folder == "all" else [args.folder]
     totals = {"files": 0, "chunks": 0, "uploaded": 0, "skipped": 0}
     for key in targets:
-        st = process_folder(key, dry_run=args.dry_run, limit=args.limit, client=client)
+        st = process_folder(key, dry_run=args.dry_run, limit=args.limit,
+                            client=client, files_filter=args.files)
         for k in totals:
             totals[k] += st[k]
 

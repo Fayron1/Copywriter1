@@ -46,3 +46,10 @@ viktor_media/
 
 # New KB source (large binaries)
 knowledge_base/
+
+# Source downloads (integrated into KB already)
+Госзакупки/
+Маркетплейсы/
+
+# Junk
+nul

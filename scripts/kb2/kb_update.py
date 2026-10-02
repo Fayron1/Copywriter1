@@ -439,6 +439,11 @@ def handle_update(upd: Dict[str, Any]) -> None:
     if not CHAT_ID:
         CHAT_ID = cid  # первый написавший становится владельцем
         logger.info(f"Зарегистрирован chat_id: {cid}")
+    elif cid != CHAT_ID:
+        # ФИКС (аудит 🔴3): чужой чат не может заливать файлы (отравление
+        # RAG) и запускать /gen за наш счёт
+        logger.warning(f"ЧУЖОЙ chat_id {cid} — игнорирую")
+        return
 
     text = (msg.get("text") or "").strip()
     doc = msg.get("document")
@@ -499,6 +504,8 @@ def handle_update(upd: Dict[str, Any]) -> None:
 
     if doc:
         filename = doc.get("file_name", "document")
+        # ФИКС (аудит 🔴4): path traversal — «../../x.pdf» пишет вне KB_ROOT
+        filename = os.path.basename(filename.replace("\\", "/"))
         if not re.search(r"\.(pdf|fb2|docx|odt|txt)$", filename.lower()):
             tg_call("sendMessage", chat_id=cid, text="Формат не поддерживаю. Нужен PDF/FB2/DOCX/ODT/TXT.")
             return

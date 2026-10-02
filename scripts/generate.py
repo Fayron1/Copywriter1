@@ -199,6 +199,23 @@ def save_html_preview(state, output_dir: Path):
     if isinstance(keywords_list, str):
         keywords_list = [k.strip() for k in keywords_list.split(",") if k.strip()]
 
+    # Тот же SEO-гвард для HTML-превью: ключи-фантомы не показываем
+    def _kw_in_body(kw: str, body: str) -> bool:
+        body_l = body.lower()
+        # годы 202x не проверяем — SEO-суффикс, а не фактическое обещание
+        digits = [d for d in re.findall(r"\d+", kw)
+                  if not (len(d) == 4 and d.startswith("20"))]
+        for d in digits:
+            if d not in body_l:
+                return False
+        words = [w for w in re.findall(r"[а-яёa-z]{4,}", kw.lower())]
+        if not words:
+            return True
+        words.sort(key=len, reverse=True)
+        return all(w[:5] in body_l for w in words[:2])
+
+    keywords_list = [k for k in keywords_list if _kw_in_body(k, article_content)]
+
     keywords_html = "".join([
         f'<span class="keyword-tag">{kw}</span>'
         for kw in keywords_list
@@ -924,6 +941,15 @@ def save_html_preview(state, output_dir: Path):
     html_path.write_text(html_content, encoding="utf-8")
     logger.info(f"🌐 HTML превью: {html_path}")
 
+    # Волна 2: валидация HTML (таблицы, якоря, LaTeX-артефакты)
+    try:
+        from agents.html_and_entities import validate_html
+        issues = validate_html(html_content)
+        for issue in issues:
+            logger.warning(f"   {issue}")
+    except Exception as e:
+        logger.debug(f"HTML-валидатор пропущен: {e}")
+
 
 def save_result(state, output_dir: Path):
     """Сохранить результат pipeline в файлы."""
@@ -935,6 +961,61 @@ def save_result(state, output_dir: Path):
 
     # Добавляем мета-информацию в начало
     meta = state.final_meta or {}
+
+    # SEO-гвард (кейс статьи 24v2): keyword-фантомы — «возврат обеспечения
+    # заявки 10 дней» в мета при отсутствии в теле и в законе. Ключ
+    # считается подтверждённым, если два самых длинных его слова есть в
+    # теле статьи; фантомы выбрасываются до записи frontmatter.
+    def _kw_in_body(kw: str, body: str) -> bool:
+        body_l = body.lower()
+        # цифра в ключе обязана быть в теле («10 дней» без «10» = фантом)
+        # годы 202x не проверяем — SEO-суффикс, а не фактическое обещание
+        digits = [d for d in re.findall(r"\d+", kw)
+                  if not (len(d) == 4 and d.startswith("20"))]
+        for d in digits:
+            if d not in body_l:
+                return False
+        words = [w for w in re.findall(r"[а-яёa-z]{4,}", kw.lower())]
+        if not words:
+            return True
+        words.sort(key=len, reverse=True)
+        # стем-сравнение (5 символов) — «обжалования» ≈ «обжалование»
+        return all(w[:5] in body_l for w in words[:2])
+
+    _kw_raw = meta.get("keywords") or []
+    _kw_ok = [k for k in _kw_raw if _kw_in_body(k, article_content)]
+    if len(_kw_ok) < len(_kw_raw):
+        logger.warning(f"   🟡 SEO-гвард: выброшены keyword-фантомы "
+                       f"({len(_kw_raw) - len(_kw_ok)} шт.): "
+                       f"{[k for k in _kw_raw if k not in _kw_ok]}")
+    if _kw_ok:
+        meta["keywords"] = _kw_ok
+
+    # Мета-гвард title/description (кейс 24v4: H1 и Booster вписали «10
+    # календарных дней» при верных 5 в теле). Цифра мета-слоя обязана
+    # быть в теле; больной title откатывается на чистый H1, description —
+    # на первый содержательный абзац.
+    if not _kw_in_body(meta.get("title") or "", article_content):
+        _h1 = re.search(r"^#\s+(.+)$", article_content, re.M)
+        _clean = (_h1.group(1).strip() if _h1 else state.topic)
+        if not _kw_in_body(_clean, article_content):
+            _clean = re.sub(r":\s*срок[^:]*", "", _clean).strip(" :")
+        logger.warning("   🟡 SEO-гвард: title содержал цифры вне тела — "
+                       "откат на чистый заголовок")
+        meta["title"] = _clean
+    if not _kw_in_body(meta.get("description") or "", article_content):
+        _lead = ""
+        for _raw in article_content.split("\n"):
+            _line = re.sub(r"[*_`#>\[\]|]", "", _raw.strip()).strip()
+            if len(_line) >= 60 and not _line.startswith(
+                    ("---", "title", "desc", "keyw")):
+                _lead = _line
+                break
+        if _lead:
+            meta["description"] = (_lead[:157] + "…" if len(_lead) > 157 else _lead)
+            logger.warning("   🟡 SEO-гвард: description содержал цифры вне "
+                           "тела — откат на первый абзац")
+
     frontmatter = "---\n"
     frontmatter += f"title: \"{meta.get('title', state.topic)}\"\n"
     frontmatter += f"description: \"{meta.get('description', '')}\"\n"

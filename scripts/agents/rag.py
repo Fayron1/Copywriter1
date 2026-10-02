@@ -9,12 +9,42 @@ from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger("agents.rag")
 
+# Доменные ключи базы знаний: направление статьи → префиксы source_file.
+# Используются только для буста ранжирования (+4%), НЕ для фильтра:
+# смежные источники (ГК, общий КоАП, обзоры судов) остаются доступны.
+DIRECTION_BOOST_PREFIXES: Dict[str, List[str]] = {
+    "закупки": [
+        "legislation/Закупки_", "legislation/44-ФЗ_снимок",
+        "legislation/ФЗ-44_", "legislation/ФЗ-223_",
+        "legislation/КоАП_закупочный", "legislation/Минфин_письмо",
+    ],
+    "вэд": [
+        "legislation/Валютный", "legislation/Закупки_ФЗ_279",
+    ],
+    "налоги": [
+        "legislation/НК_", "legislation/Налогов",
+        "legislation/Закупки_ГК_РФ",
+    ],
+    "трудовое": [
+        "legislation/Изменения_трудового", "legislation/КЭДО",
+        "legislation/ТК_РФ",
+    ],
+    "защита данных": [
+        "legislation/152", "legislation/ФЗ-152",
+    ],
+    "маркетинг": [
+        "business/marketplaces", "business/unit_economics",
+        "business/marketing",
+    ],
+}
+
 
 def query_knowledge(
     query_text: str,
     agent_id: str,
     qdrant_client=None,
     extra_filters: Optional[Dict] = None,
+    direction: str = "",
 ) -> List[Dict[str, Any]]:
     """
     Семантический поиск в Qdrant для конкретного агента.
@@ -24,6 +54,8 @@ def query_knowledge(
         agent_id: ID агента (определяет фильтры и top_k)
         qdrant_client: клиент Qdrant (если None — создаёт новый)
         extra_filters: дополнительные фильтры поверх агентских
+        direction: домен статьи (закупки/вэд/налоги/...) — включает
+            доменный буст ранжирования (см. DIRECTION_BOOST_PREFIXES)
 
     Returns:
         Список найденных чанков с payload
@@ -105,18 +137,32 @@ def query_knowledge(
                 range_val = models.Range(gte=0.0)
                 range_val.gte = today_str
 
+            # КРИТИЧНО: is_null НЕ матчит ПОЛНОСТЬЮ ОТСУТСТВУЮЩЕЕ поле, а у
+            # законов valid_until нет вовсе — однажды is_null-вариант выкинул
+            # из выдачи fact_finder все 31k законодательных чанков, оставив
+            # ~1k отчётов (диагностика 2026-10-02). Поэтому тройное should:
+            # актуальные ИЛИ пустые ИЛИ явные null.
+            should_variants = [
+                models.IsNullCondition(
+                    is_null=models.PayloadField(key="valid_until"),
+                ),
+            ]
+            try:
+                should_variants.insert(0, models.IsEmptyCondition(
+                    is_empty=models.PayloadField(key="valid_until"),
+                ))
+            except AttributeError:
+                pass
             must_conditions.append(
                 Filter(should=[
                     FieldCondition(
                         key="valid_until",
                         range=range_val,
                     ),
-                    models.IsNullCondition(
-                        is_null=models.PayloadField(key="valid_until"),
-                    ),
+                    *should_variants,
                 ])
             )
-            logger.info(f"RAG [{agent_id}]: фильтр актуальности (valid_until >= {today_str} OR null)")
+            logger.info(f"RAG [{agent_id}]: фильтр актуальности (valid_until >= {today_str} OR empty OR null)")
 
         search_filter = Filter(must=must_conditions) if must_conditions else None
 
@@ -140,12 +186,33 @@ def query_knowledge(
                 chunk["text"] = hit.payload.get("text", "")
             chunks.append(chunk)
 
+        # ДОМЕННЫЙ БУСТ ранжирования (см. apply_direction_boost)
+        chunks = apply_direction_boost(chunks, direction)
+
         logger.info(f"RAG [{agent_id}]: найдено {len(chunks)} чанков (query: {query_text[:50]}...)")
         return chunks
 
     except Exception as e:
         logger.error(f"RAG [{agent_id}] ошибка — пропускаем RAG (возвращаем пустой контекст): {e}")
         return []
+
+
+def apply_direction_boost(chunks: List[Dict], direction: str) -> List[Dict]:
+    """Доменный буст ранжирования: чанки домена статьи получают +4% к
+    скору. Фильтр не режет смежные источники (ГК/КоАП нужны закупкам),
+    но «жалоба» из НК ст. 46 больше не обыгрывает жалобу в ФАС по 44-ФЗ
+    (диагностика 2026-10-02: топ-1/2 занимали чужие домены)."""
+    if not direction:
+        return chunks
+    prefixes = DIRECTION_BOOST_PREFIXES.get(direction)
+    if not prefixes:
+        return chunks
+    for ch in chunks:
+        src = str(ch.get("source_file") or "")
+        if any(src.startswith(p) for p in prefixes):
+            ch["score"] = ch.get("score", 0.0) * 1.04
+    chunks.sort(key=lambda c: c.get("score", 0.0), reverse=True)
+    return chunks
 
 
 def format_rag_context(chunks: List[Dict], max_chars: int = 8000) -> str:

@@ -245,6 +245,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--top", type=int, default=30)
     ap.add_argument("--json", default=None, help="путь для полного JSON-отчёта")
+    ap.add_argument("--expander", action="store_true",
+                    help="добавить темы из topic_expander (TOPIC_MATRIX × формулы)")
+    ap.add_argument("--sphere", default=None,
+                    help="фильтр тем экспандера по сфере (закупки/маркетинг/...)")
     args = ap.parse_args()
 
     # .env
@@ -256,7 +260,17 @@ def main():
         except ImportError:
             pass
 
-    rows = evaluate(SEEDS)
+    seeds = list(SEEDS)
+    if args.expander:
+        from kb2.topic_expander import generate_all
+        pool = generate_all()
+        if args.sphere:
+            pool = [t for t in pool if t["sphere"] == args.sphere]
+        logger.info(f"Экспандер: +{len(pool)} тем"
+                    f"{' (сфера: ' + args.sphere + ')' if args.sphere else ''}")
+        seeds += pool
+
+    rows = evaluate(seeds)
 
     print("\n" + "=" * 100)
     print(f"{'СКОР':>6} {'kb':>5} {'спр':>4} {'крюк':>5}  {'тип':11s} {'сфера':9s} ТЕМА")

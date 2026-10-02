@@ -192,16 +192,25 @@ def calc_scenario(inp: ScenarioInput) -> ScenarioResult:
             r.formulas.append(f"УСН 6% = {r.revenue_ex_vat:,.0f} × 0.06 = {r.usn_tax:,.0f} ₽ (до уменьшения на взносы)")
             # Уменьшение на страховые взносы: без работников — до 100%,
             # с работниками — не более 50% (п. 3.1 ст. 346.21 НК РФ).
+            # ФИКС (аудит 07-🔴1, 2026-10-02): с работниками в уменьшение
+            # входят взносы ЗА СЕБЯ (фикс + 1%) И ЗА РАБОТНИКОВ — раньше
+            # считались только «за себя», занижая уменьшение на миллионы.
             ins = P["insurance_fixed"]
             if r.revenue_ex_vat > P["insurance_1pct_threshold"]:
                 ins += min((r.revenue_ex_vat - P["insurance_1pct_threshold"]) * 0.01, P["insurance_1pct_max"])
+            # r.insurance = только «за себя» (семантика едина с ОСНО-веткой);
+            # работодателя учитываем отдельно в reduction и total_burden.
             r.insurance = ins
             if inp.employees:
-                reduction = min(ins, r.usn_tax * 0.5)
+                ins_full = ins + r.insurance_employer
+            else:
+                ins_full = ins
+            if inp.employees:
+                reduction = min(ins_full, r.usn_tax * 0.5)
                 r.usn_after_reduction = r.usn_tax - reduction
-                r.formulas.append(f"Уменьшение на взносы (с работниками, max 50%) = min({ins:,.0f}; {r.usn_tax:,.0f} × 50%) = {reduction:,.0f} ₽")
+                r.formulas.append(f"Уменьшение на взносы (за себя {P['insurance_fixed']:,.0f} + 1% + за работников {r.insurance_employer:,.0f}; max 50% налога) = min({ins_full:,.0f}; {r.usn_tax:,.0f} × 50%) = {reduction:,.0f} ₽")
                 r.formulas.append(f"УСН к уплате = {r.usn_tax:,.0f} − {reduction:,.0f} = {r.usn_after_reduction:,.0f} ₽")
-                r.notes.append("С работниками УСН уменьшается на взносы НЕ БОЛЕЕ чем на 50% (п. 3.1 ст. 346.21 НК РФ).")
+                r.notes.append("С работниками УСН уменьшается на взносы за себя И за работников НЕ БОЛЕЕ чем на 50% (п. 3.1 ст. 346.21 НК РФ).")
             else:
                 reduction = min(ins, r.usn_tax)
                 r.usn_after_reduction = r.usn_tax - reduction
@@ -284,10 +293,17 @@ def calc_scenario(inp: ScenarioInput) -> ScenarioResult:
             ]
 
     # ── 4. Совокупная нагрузка (УСН после уменьшения на взносы) ──
+    # ФИКС (аудит 05-§2.1, 🔴5): в «Всего нагрузка» не входили страховые
+    # взносы (фикс ИП + 1% + работодателя) — сравнение режимов смещалось
+    # в пользу УСН на десятки процентов. Взносы платятся в любом режиме.
     usn_final = getattr(r, "usn_after_reduction", None)
     if usn_final is None:
         usn_final = r.usn_tax
-    r.total_burden = r.vat_payable + usn_final + r.profit_or_ndfl_tax
+    # r.insurance теперь всегда только «за себя»; работодатель — отдельным полем
+    _insurance_total = getattr(r, "insurance", 0.0) + getattr(r, "insurance_employer", 0.0)
+    r.total_burden = r.vat_payable + usn_final + r.profit_or_ndfl_tax + _insurance_total
+    r.notes.append(f"Всего нагрузка включает страховые взносы: "
+                   f"{_insurance_total:,.0f} ₽ (фикс/1% + работодателя).")
     if r.revenue_ex_vat > 0:
         r.effective_rate = r.total_burden / r.revenue_ex_vat
     return r
