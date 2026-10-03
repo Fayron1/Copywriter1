@@ -1219,10 +1219,38 @@ _STAGE_ARTICLE_MISMATCH = re.compile(
     r"[\s\S]{0,120}?ст\.?\s*7\.30\.2|"
     r"ст\.?\s*7\.30\.2[\s\S]{0,120}?"
     r"(?:выбор\s+способ\w+|способ\s+определени\w+\s+поставщик)", re.I)
-# PRIMARY_SOURCE_ONLY: поисковые редиректы в источниках
+# PART_TOPIC_MISMATCH: неверная привязка части к предмету (ревью 27v3)
+# Инварианты сверенны с текстом КоАП РФ (снимок 2026-10-03)
+# ч.1 ст.7.30.1 = планирование, НЕ НМЦК; ч.2 = нормирование, НЕ НМЦК
+# ч.11 = СМП/СОНКО, НЕ планирование; ч.10 ст.7.30.2 = дисквалификация
+_PART1_WRONG_TOPIC = re.compile(
+    r"ч\.?\s*1[^.\n]{0,60}(?:НМЦК|обосновани\w+\s+НМЦК)", re.I)
+_PART2_WRONG_TOPIC = re.compile(
+    r"ч\.?\s*2[^.\n]{0,60}(?:НМЦК|обосновани\w+\s+НМЦК)", re.I)
+_PART4_WRONG_TOPIC = re.compile(
+    r"ч\.?\s*4[^.\n]{0,60}НМЦК", re.I)
+_PART11_WRONG_TOPIC = re.compile(
+    r"ч\.?\s*11[^.\n]{0,60}(?:планировани|иные\s+нарушени)", re.I)
+_PART10_PENALTY = re.compile(
+    r"ч\.?\s*10[^.\n]{0,40}ст\.?\s*7\.30\.2[^.\n]{0,80}(?:штраф|1%\s*НМЦК)"
+    r"|ч\.?\s*10[^.\n]{0,40}1%\s*НМЦК", re.I)
 _SEARCH_REDIRECT = re.compile(
     r"vertexaisearch|google\.com/url\?|yandex\.ru/click|"
     r"redirect\.|search\?q=", re.I)
+# LAW_REGIME_CONSISTENCY: 223-ФЗ в лиде при 44-ФЗ в теле
+_LEAD_223 = re.compile(
+    r"(?:закупк\w+|ошибк\w+|нарушени\w+)[^.\n]{0,80}по\s*223-ФЗ", re.I)
+# SANCTION_TABLE_NO_PLACEHOLDERS: «уточняется» в таблице штрафов
+_SANCTION_PLACEHOLDER = re.compile(
+    r"(?:\|\s*)?уточняется(?:\s*\|)|"
+    r"(?:\|\s*)?по\s+соответствующ\w+\s+част\w+\s*(?:\|)", re.I)
+# ARTICLE_PART_MERGE_GUARD: несколько частей с одной санкцией
+_MULTI_PART_SANCTION = re.compile(
+    r"ч\.?\s*\d+\s*,\s*ч\.?\s*\d+[^.\n]{0,60}(?:штраф|санкци|составля\w+)", re.I)
+# PROCEDURAL_ROUTE: широкое «остальные — ФАС»
+_BROAD_APPEAL = re.compile(
+    r"(?:остальн\w+|все\s+остальн\w*)[^.\n]{0,40}(?:ФАС|рассматривают)",
+    re.I)
 
 # ── Ревью 27 (2026-10-03, 6/10): санкции без сумм, заголовок-обещание ──
 # NO_APPROXIMATE_SANCTIONS: приблизительные штрафы в юридической статье
@@ -1894,6 +1922,29 @@ def lint_legal(text: str) -> List[str]:
                           f"число перед НМЦК; валидные формы «10% НМЦК» / "
                           f"«20% НМЦК». Блокировка публикации")
             break
+        # ── Ревью 27v4 (2026-10-03, 7/10): режим, уточняется, merge ──
+        # LAW_REGIME_CONSISTENCY: 223-ФЗ в лиде при 44-ФЗ в теле
+        if _LEAD_223.search(text[:800]) and re.search(r"44-ФЗ", text[800:]):
+            issues.append("🔴 LAW REGIME MISMATCH: лид упоминает 223-ФЗ, "
+                          "тело — 44-ФЗ. Один закон на одну статью; вторую "
+                          "систему не упоминать")
+        # SANCTION_TABLE_NO_PLACEHOLDERS: «уточняется» в таблице
+        for m in list(_SANCTION_PLACEHOLDER.finditer(text))[:2]:
+            issues.append("🔴 ЗАПОЛНИТЕЛЬ В ТАБЛИЦЕ САНКЦИЙ: «уточняется» — "
+                          "указать точную часть статьи и сумму либо убрать "
+                          "строку из таблицы")
+            break
+        # ARTICLE_PART_MERGE_GUARD: ч.1+ч.2 одной санкцией
+        for m in list(_MULTI_PART_SANCTION.finditer(text))[:2]:
+            issues.append("🟡 ОБЪЕДИНЕНИЕ ЧАСТЕЙ: разные части статьи не "
+                          "могут иметь одну санкцию без подтверждения — "
+                          "разделить на отдельные строки")
+            break
+        # PROCEDURAL_ROUTE: широкое «остальные — ФАС»
+        if _BROAD_APPEAL.search(text):
+            issues.append("🟡 МАРШРУТ БЕЗ КОНТЕКСТА: орган рассмотрения "
+                          "зависит от части КоАП и подведомственности — "
+                          "проверьте или уберите категоричное «остальные — ФАС»")
         # Ревью 26: спецрежим + антидемпинг без отдельной ветки
         if _SPECIAL_REGIME.search(text) and re.search(r"антидемпинг", text, re.I) \
                 and not _SPECIAL_REGIME_OK.search(text):
