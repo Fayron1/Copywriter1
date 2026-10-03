@@ -1764,7 +1764,7 @@ def lint_legal(text: str) -> List[str]:
                       f"заменяет верификацию")
     # обещанные секции без содержимого
     for m in list(_PROMISED_SECTION.finditer(text))[:3]:
-        tail = text[m.end():m.end() + 400]
+        tail = text[m.end():m.end() + 2000]
         nxt = re.search(r"^#{2,3}\s", tail, re.M)
         section = tail[:nxt.start()] if nxt else tail
         bullets = len(re.findall(r"^\s*(?:-|\*|\d+[.)]|\[ \])", section, re.M))
