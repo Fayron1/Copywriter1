@@ -2627,6 +2627,11 @@ class Pipeline:
             for e in valid_edits:
                 instr_by_idx.setdefault(e["section_index"], []).append(e["instruction"])
                 
+            # ФИКС (аудит 🔴7): section_index от нестабильного Gemini
+            # без проверки границ — IndexError ронял весь прогон
+            n_sections = len(sections)
+            instr_by_idx = {idx: v for idx, v in instr_by_idx.items()
+                            if isinstance(idx, int) and 0 <= idx < n_sections}
             for idx in instr_by_idx:
                 sec = sections[idx]
                 prev_raw = sections[idx - 1]["raw"] if idx - 1 >= 0 else ""
