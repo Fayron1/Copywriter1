@@ -815,8 +815,11 @@ class Pipeline:
                             cp_nums = None
                             if getattr(state, "claim_pack", None):
                                 import re as _re_cp
-                                cp_nums = set(_re_cp.sub(r"\s", "",
-                                                          state.claim_pack).split())
+                                # ФИКС (аудит 🔴6): sub+split давал один
+                                # гигантский токен — ветка подтверждения
+                                # никогда не работала. Извлекаем числа.
+                                cp_nums = set(_re_cp.findall(
+                                    r"\d+(?:[.,]\d+)*", str(state.claim_pack)))
                             for issue in check_h1_support(state.final_article or "",
                                                           cp_nums):
                                 validation_warnings.append(issue)
@@ -1638,7 +1641,8 @@ class Pipeline:
                 import datetime
                 from .norm_params import format_params_block
                 rag_block = format_params_block(
-                    _params, datetime.datetime.now().year) + "\n\n" + rag_block
+                    _params, getattr(state, "article_year", None)
+                    or datetime.datetime.now().year) + "\n\n" + rag_block
             except Exception as e:
                 logger.warning(f"   ⚠️ Блок параметров не встроен: {e}")
 
@@ -2256,7 +2260,7 @@ class Pipeline:
             try:
                 import datetime
                 from .norm_params import format_params_block
-                blk = format_params_block(_np, datetime.datetime.now().year)
+                blk = format_params_block(_np, getattr(state, "article_year", datetime.datetime.now().year) or datetime.datetime.now().year)
                 if blk:
                     entity_audit_block = (
                         blk + "\n\n"
@@ -4176,7 +4180,7 @@ class Pipeline:
             try:
                 from .norm_params import format_params_block
                 import datetime
-                blk = format_params_block(_np, datetime.datetime.now().year)
+                blk = format_params_block(_np, getattr(state, "article_year", datetime.datetime.now().year) or datetime.datetime.now().year)
                 if blk:
                     claim_pack_block = (
                         blk + "\n\n"
@@ -4272,7 +4276,8 @@ class Pipeline:
         
         # Фиксация красивого заголовка H1
         best_title = state.final_meta.get("title") or state.final_meta.get("h1") or state.topic
-        h_match = re.search(r"^(#{1,2}\s+.*?)$", state.final_article, re.MULTILINE)
+        # ФИКС (аудит 🟡10): #{1,2} матчил H2 при отсутствии H1 и затирал его
+        h_match = re.search(r"^(#\s+.*?)$", state.final_article, re.MULTILINE)
         if h_match:
             h_line = h_match.group(1)
             state.final_article = state.final_article.replace(h_line, f"# {best_title}", 1)
@@ -4535,8 +4540,11 @@ class Pipeline:
             cover_data = _generate_image_with_fallback(full_cover_prompt, "1536x768", MODELS["openai_image_primary"])
             logger.info(f"   🔍 DEBUG: Сырой ответ API (обложка): {cover_data}")
             cover_path = images_dir / "main.png"
-            if not _save_image_from_response(cover_data, cover_path):
-                raise ValueError("Не удалось извлечь и сохранить обложку (ни из Base64, ни из URL)")
+            cover_ok = False
+            if _save_image_from_response(cover_data, cover_path):
+                cover_ok = True
+            else:
+                logger.warning("   ⚠️ Обложка не сохранена — в статью битая ссылка не попадёт (аудит 🟡11)")
   
             # Б. Генерация разделителей разделов (Размер 1536x384)
             section_scenes = artist_response.get("section_scenes", [])
@@ -4562,12 +4570,14 @@ class Pipeline:
 
         # 7. Интеграция картинок в Markdown
         # А. Встраивание обложки в начало статьи (под заголовок H1)
-        h1_match = re.search(r"^(#\s+.*?)$", article_text, re.MULTILINE)
-        if h1_match:
-            h1_line = h1_match.group(1)
-            article_text = article_text.replace(h1_line, f"{h1_line}\n\n![Обложка](images/main.png)", 1)
-        else:
-            article_text = f"![Обложка](images/main.png)\n\n" + article_text
+        # ФИКС (аудит 🟡11): только при реально сохранённой обложке
+        if cover_ok:
+            h1_match = re.search(r"^(#\s+.*?)$", article_text, re.MULTILINE)
+            if h1_match:
+                h1_line = h1_match.group(1)
+                article_text = article_text.replace(h1_line, f"{h1_line}\n\n![Обложка](images/main.png)", 1)
+            else:
+                article_text = f"![Обложка](images/main.png)\n\n" + article_text
 
         # Б. Замена текстовых маркеров на Markdown-теги
         matches = list(re.finditer(marker_pattern, article_text))

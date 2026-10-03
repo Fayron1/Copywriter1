@@ -105,7 +105,16 @@ def validate_math(text: str, tolerance: float = 0.02) -> List[str]:
                 op = f"{a:g} − {b:g} "
             if expected == 0 and r == 0:
                 continue
-            if abs(expected - r) > max(abs(expected) * tolerance, 1.0):
+            # ФИКС (аудит 🟡4): допуск по значащим цифрам НАПИСАННОГО числа.
+            # «120 млн × 6% = 7 млн» — 1 значащая цифра, допуск ±0.5×10^6,
+            # легитимное округление; «3,6 млн» вместо 7,2 — 2 цифры, ловится.
+            _r_raw = m.group(3)
+            _r_digits = re.sub(r"[^\d]", "", _r_raw).lstrip("0")
+            _sig = max(len(_r_digits), 1)
+            import math as _math
+            _order = int(_math.floor(_math.log10(max(abs(r), 1))))
+            _allowed = max(0.5 * 10 ** (_order - _sig + 1), 1.0)
+            if abs(expected - r) > _allowed:
                 issues.append(
                     f"🔴 МАТЕМАТИЧЕСКАЯ ОШИБКА: «{raw.strip()}» — пересчёт: "
                     f"{op}= {expected:g}, в тексте {r:g}. "

@@ -482,6 +482,27 @@ def process_folder(folder_key: str, dry_run: bool = False, limit: Optional[int] 
 
     live_sources = [f"{folder_key}/{f.name}" for f in files]
 
+    # ФИКС (аудит 🟡18, 2026-10-02): uuid5 включает content_hash — обновлённый
+    # файл получает новые ID, а старые чанки остаются висеть (prune смотрит
+    # только на source_file, который не изменился). Удаляем точки файлов
+    # этой папки ДО заливки: перезаливка файла = чистая замена.
+    if files_filter is None and not dry_run:
+        try:
+            from qdrant_client.models import Filter, FieldCondition, MatchAny, FilterSelector
+            stale_flt = Filter(must=[
+                FieldCondition(key="domain", match=MatchValue(value=folder_key)),
+                FieldCondition(key="source_file", match=MatchAny(any=live_sources)),
+            ])
+            stale = client.count(collection_name=COLLECTION,
+                                 count_filter=stale_flt, exact=True).count
+            if stale:
+                client.delete(collection_name=COLLECTION,
+                              points_selector=FilterSelector(filter=stale_flt))
+                logger.info(f"   🧹 delete-by-source {folder_key}: "
+                            f"удалено {stale} старых точек перед перезаливкой")
+        except Exception as e:
+            logger.warning(f"   ⚠️ delete-by-source не удался (продолжаем): {e}")
+
     # Эмбеддинги батчами (локальные, e5) и заливка
     for i in range(0, len(pending_points), EMBED_BATCH):
         batch = pending_points[i:i + EMBED_BATCH]
