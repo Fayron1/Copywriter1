@@ -40,6 +40,7 @@ if str(SCRIPTS) not in sys.path:
 
 from copywriter_kb.parsers import extract_text  # noqa: E402
 from embedding_system.local_embeddings import embed, get_dim  # noqa: E402
+from distiller import clean_for_index, nav_junk_ratio, distill_chunks, DISTILL_MODEL  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger("kb2.loader")
@@ -112,6 +113,7 @@ FOLDERS: Dict[str, Dict[str, Any]] = {
     },
     "business/marketing": {
         "agents": ["booster", "engineer"], "chunk": "book", "source_type": "book",
+        "distill": True,
         "label": "📈 Маркетинг",
     },
     # ── Подпапки маркетинга (2026-10-04): рекурсивный сбор, свои правила. ──
@@ -145,14 +147,14 @@ FOLDERS: Dict[str, Dict[str, Any]] = {
         # Барден и выжимки: психология покупки — КАК писать офферы и хуки,
         # не факты для фактчека.
         "agents": ["heart", "booster"], "chunk": "book",
-        "source_type": "book", "recursive": True,
+        "source_type": "book", "recursive": True, "distill": True,
         "label": "🧠 Психология покупки",
     },
     "craft/persuasion": {
         # Чалдини, Канеман, Талер и пр.: влияние и поведенческая экономика —
         # КАК писать убедительно (Heart/Booster), не доменные факты.
         "agents": ["heart", "booster"], "chunk": "book", "source_type": "book",
-        "recursive": True,
+        "recursive": True, "distill": True,
         "label": "🎣 Убеждение (persuasion)",
     },
     "business/marketplaces": {
@@ -161,10 +163,12 @@ FOLDERS: Dict[str, Dict[str, Any]] = {
         # Отдельная папка, а не business/marketing: loader не пропускает уже
         # залитые файлы, а в маркетинге лежат тяжёлые книги — пересчёт дорог.
         "agents": ["fact_finder", "engineer"], "chunk": "guide", "source_type": "reference",
+        "distill": True,
         "label": "🛒 Маркетплейсы (тарифы и оферты)",
     },
     "business/methodology": {
         "agents": ["engineer", "heart"], "chunk": "book", "source_type": "book",
+        "distill": True,
         "label": "🧭 Методологии",
     },
     "business/unit_economics": {
@@ -517,17 +521,20 @@ def collect_files(folder_key: str) -> List[Path]:
 
 
 def process_folder(folder_key: str, dry_run: bool = False, limit: Optional[int] = None,
-                   client=None, files_filter: Optional[str] = None) -> Dict[str, int]:
+                   client=None, files_filter: Optional[str] = None,
+                   force_distill: bool = False) -> Dict[str, int]:
     cfg = FOLDERS[folder_key]
     folder = KB_ROOT / folder_key
-    stats = {"files": 0, "chunks": 0, "uploaded": 0, "skipped": 0, "chars": 0}
+    stats = {"files": 0, "chunks": 0, "uploaded": 0, "skipped": 0, "chars": 0,
+             "junk_chunks": 0, "junk_files": 0}
 
     logger.info(f"\n{'=' * 60}\n{cfg['label']} — {folder}")
     if not folder.exists():
         logger.warning("   папка не найдена")
         return stats
 
-    files = collect_files(folder_key)
+    all_files = collect_files(folder_key)
+    files = list(all_files)
     if files_filter:
         # Точечная дозагрузка: glob-паттерн по имени файла (например
         # «Минфин_письмо*»), чтобы не пересчитывать всю папку ради
@@ -538,7 +545,9 @@ def process_folder(folder_key: str, dry_run: bool = False, limit: Optional[int] 
         logger.info(f"   фильтр --files '{files_filter}': {before} → {len(files)}")
     if limit:
         files = files[:limit]
-    logger.info(f"   файлов: {len(files)}, стратегия чанков: {cfg['chunk']}")
+    use_distill = force_distill or bool(cfg.get("distill"))
+    logger.info(f"   файлов: {len(files)}, стратегия чанков: {cfg['chunk']}"
+                f"{', дистилляция ' + DISTILL_MODEL if use_distill else ''}")
 
     pending_points: List[Dict[str, Any]] = []
 
@@ -548,9 +557,32 @@ def process_folder(folder_key: str, dry_run: bool = False, limit: Optional[int] 
             logger.warning(f"   ⚠️ пусто после парсинга: {f.name}")
             stats["skipped"] += 1
             continue
+        text = clean_for_index(text)
+        # Файл-навигация: почти без смысловых строк — целиком в мусор.
+        # Убирает Ozon-тип снимков, где 95% меню сайта.
+        if cfg["chunk"] != "law" and nav_junk_ratio(text) > 0.6:
+            logger.warning(f"   🗑️ файл-навигация (ratio {nav_junk_ratio(text):.2f}), скип: {f.name}")
+            stats["junk_files"] += 1
+            stats["skipped"] += 1
+            continue
         chunks = chunk_text(text, cfg["chunk"], CHUNK_SIZES[cfg["chunk"]])
         if not chunks:
             logger.warning(f"   ⚠️ нет чанков: {f.name}")
+            stats["skipped"] += 1
+            continue
+
+        distills: List[Dict[str, Any]] = []
+        if use_distill and not dry_run:
+            distills = distill_chunks([ch["text"] for ch in chunks])
+            kept_pairs = [(ch, d) for ch, d in zip(chunks, distills)
+                          if not d.get("is_junk")]
+            junk_n = len(chunks) - len(kept_pairs)
+            if junk_n:
+                stats["junk_chunks"] += junk_n
+                logger.info(f"   🧹 LLM отбраковал {junk_n}/{len(chunks)} чанков: {f.name}")
+            chunks = [ch for ch, _ in kept_pairs]
+            distills = [d for _, d in kept_pairs]
+        if not chunks:
             stats["skipped"] += 1
             continue
 
@@ -563,6 +595,7 @@ def process_folder(folder_key: str, dry_run: bool = False, limit: Optional[int] 
             meta_extra.update(snapshot_meta(f.name, cfg["snapshot_ttl"]))
 
         for idx, ch in enumerate(chunks):
+            d = distills[idx] if idx < len(distills) else {}
             payload: Dict[str, Any] = {
                 "text": ch["text"],
                 "source_file": source_rel,
@@ -580,13 +613,26 @@ def process_folder(folder_key: str, dry_run: bool = False, limit: Optional[int] 
             if "article_number" in ch and ch["article_number"]:
                 payload["article_number"] = ch["article_number"]
                 payload["codex"] = _guess_codex(f.name)
+            # Дистиллят (LLM): сжатая суть для эмбеддинга и для engineer.
+            # Текст чанка остаётся сырым очищенным — для цитирования.
+            if d.get("concept"):
+                payload["distilled_concept"] = d.get("concept", "")
+                payload["distilled_description"] = d.get("description", "")
+                payload["distilled_application"] = d.get("application", "")
             stats["chunks"] += 1
             stats["chars"] += len(ch["text"])
             if not dry_run:
+                is_craft = payload["kb_layer"] == "craft"
+                embed_text = (
+                    f"{d.get('concept', '')}. {d.get('description', '')}. "
+                    f"{d.get('application', '')}"
+                    if (d.get("concept") and is_craft) else ch["text"]
+                )
                 pending_points.append({
                     "id": point_id(source_rel, idx, payload["content_hash"]),
                     "payload": payload,
                     "text": ch["text"],
+                    "embed_text": embed_text,
                 })
         stats["files"] += 1
         logger.info(f"   📖 {f.name}: {len(chunks)} чанков, {len(text):,} символов")
@@ -594,7 +640,10 @@ def process_folder(folder_key: str, dry_run: bool = False, limit: Optional[int] 
     if dry_run or not pending_points:
         return stats
 
-    live_sources = [f"{folder_key}/{f.relative_to(folder).as_posix()}" for f in files]
+    # live_sources по ВСЕМ файлам папки (не только обработанным): файл,
+    # отбракованный как навигация, тоже должен потерять старые точки.
+    live_sources = [f"{folder_key}/{f.relative_to(folder).as_posix()}"
+                    for f in all_files]
 
     # ФИКС (аудит 🟡18, 2026-10-02): uuid5 включает content_hash — обновлённый
     # файл получает новые ID, а старые чанки остаются висеть (prune смотрит
@@ -622,7 +671,7 @@ def process_folder(folder_key: str, dry_run: bool = False, limit: Optional[int] 
     for i in range(0, len(pending_points), EMBED_BATCH):
         batch = pending_points[i:i + EMBED_BATCH]
         try:
-            vectors = embed([p["text"] for p in batch], input_type="passage")
+            vectors = embed([p.get("embed_text") or p["text"] for p in batch], input_type="passage")
         except Exception as e:
             logger.error(f"❌ Ошибка эмбеддинга батча {i // EMBED_BATCH}: {e} — батч пропущен")
             continue
@@ -665,6 +714,8 @@ def main() -> int:
     ap.add_argument("--files", default=None,
                     help="точечная дозагрузка: glob-паттерн имён (например 'Минфин_письмо*')")
     ap.add_argument("--list", action="store_true", help="показать, что видит загрузчик")
+    ap.add_argument("--distill", action="store_true",
+                    help="принудительная LLM-дистилляция (иначе по cfg distill)")
     args = ap.parse_args()
 
     if args.list:
@@ -682,6 +733,7 @@ def main() -> int:
     totals = {"files": 0, "chunks": 0, "uploaded": 0, "skipped": 0}
     for key in targets:
         st = process_folder(key, dry_run=args.dry_run, limit=args.limit,
+                            force_distill=args.distill,
                             client=client, files_filter=args.files)
         for k in totals:
             totals[k] += st[k]
