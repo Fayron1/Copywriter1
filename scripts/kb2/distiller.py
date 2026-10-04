@@ -219,8 +219,123 @@ def distill_chunks(chunks: List[str], model: str = "",
     return results[:len(chunks)]
 
 
+# ── Кэш дистиллятов (для ручной дистилляции агентом без API) ──────────
+
+CACHE_PATH = Path(__file__).resolve().parent / ".distill_cache.json"
+QUEUE_DIR = Path(__file__).resolve().parent / ".distill_queue"
+
+
+def load_cache() -> dict:
+    if CACHE_PATH.exists():
+        try:
+            return json.loads(CACHE_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def save_cache(cache: dict) -> None:
+    CACHE_PATH.write_text(
+        json.dumps(cache, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def extract_queue(source_rel: str, text: str, batch_size: int = 40) -> list:
+    """Нарезать чанки файла и сохранить очереди по батчам.
+    Возвращает список путей файлов-очередей (_in.json)."""
+    import hashlib
+    sys_path = Path(__file__).resolve().parent
+    if str(sys_path) not in sys.path:
+        sys.path.insert(0, str(sys_path))
+    from loader import chunk_text, clean_for_index, CHUNK_SIZES  # noqa: E402
+    clean = clean_for_index(text)
+    chunks = chunk_text(clean, "book", CHUNK_SIZES["book"])
+    slug = re.sub(r"[^a-zA-Zа-яА-Я0-9]+", "_", source_rel)[:40].strip("_")
+    QUEUE_DIR.mkdir(exist_ok=True)
+    outs = []
+    for b in range(0, len(chunks), batch_size):
+        items = []
+        for ch in chunks[b:b + batch_size]:
+            h = hashlib.md5(re.sub(r"[\s\W]+", "", ch["text"].lower())
+                            .encode("utf-8")).hexdigest()
+            items.append({"hash": h, "text": ch["text"]})
+        path = QUEUE_DIR / f"{slug}_{b // batch_size:03d}_in.json"
+        path.write_text(json.dumps(items, ensure_ascii=False, indent=1),
+                        encoding="utf-8")
+        outs.append(str(path))
+    print(f"очередь: {len(chunks)} чанков -> {len(outs)} батчей ({slug})")
+    return outs
+
+
+def apply_out_files() -> int:
+    """Слить *_out.json (ответы агента) в кэш. Возвращает число новых."""
+    cache = load_cache()
+    added = 0
+    for f in sorted(QUEUE_DIR.glob("*_out.json")):
+        try:
+            items = json.loads(f.read_text(encoding="utf-8"))
+        except Exception as e:
+            print(f"пропуск {f.name}: {e}")
+            continue
+        for it in items:
+            h = it.get("hash")
+            if h and h not in cache:
+                cache[h] = {k: it.get(k, "") for k in
+                            ("is_junk", "concept", "description", "application")}
+                added += 1
+        f.unlink()
+    save_cache(cache)
+    print(f"кэш: +{added} записей, всего {len(cache)}")
+    return added
+
+
+def distill_chunks_cached(chunks: list, provider: str = DEFAULT_PROVIDER) -> list:
+    """distill_chunks с кэшем: что есть в кэше — берём, остальное — LLM."""
+    import hashlib
+    cache = load_cache()
+    hashes = [hashlib.md5(re.sub(r"[\s\W]+", "", c["text"].lower())
+                          .encode("utf-8")).hexdigest() for c in chunks]
+    marks = [cache.get(h) for h in hashes]
+    missing_idx = [i for i, m in enumerate(marks) if m is None]
+    if missing_idx:
+        llm = distill_chunks([chunks[i]["text"] for i in missing_idx],
+                             provider=provider)
+        for i, m in zip(missing_idx, llm):
+            marks[i] = m
+            cache[hashes[i]] = {k: m.get(k, "") for k in
+                                ("is_junk", "concept", "description",
+                                 "application")}
+        save_cache(cache)
+    return [m or {"is_junk": False, "concept": "", "description": "",
+                  "application": ""} for m in marks]
+
+
 if __name__ == "__main__":
     import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "--extract":
+        # --extract <файл> [исходный_относительный_путь]
+        import fitz
+        fp = Path(sys.argv[2])
+        rel = sys.argv[3] if len(sys.argv) > 3 else fp.name
+        if fp.suffix.lower() == ".pdf":
+            d = fitz.open(fp)
+            text = "".join(pg.get_text() for pg in d)
+            d.close()
+        elif fp.suffix.lower() == ".fb2":
+            import re as _re
+            raw = fp.read_text(encoding="utf-8", errors="ignore")
+            text = _re.sub(r"<[^>]+>", " ", raw)
+        else:
+            text = fp.read_text(encoding="utf-8", errors="ignore")
+        extract_queue(rel, text)
+        raise SystemExit(0)
+    if len(sys.argv) > 1 and sys.argv[1] == "--apply":
+        apply_out_files()
+        raise SystemExit(0)
+    if len(sys.argv) > 1 and sys.argv[1] == "--cache-stats":
+        c = load_cache()
+        junk = sum(1 for v in c.values() if v.get("is_junk"))
+        print(f"кэш: {len(c)} записей, из них мусор {junk}")
+        raise SystemExit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "--probe":
         prov = sys.argv[2] if len(sys.argv) > 2 else DEFAULT_PROVIDER
         out = distill_chunks(

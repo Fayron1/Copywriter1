@@ -41,7 +41,7 @@ if str(SCRIPTS) not in sys.path:
 from copywriter_kb.parsers import extract_text  # noqa: E402
 from embedding_system.local_embeddings import embed, get_dim  # noqa: E402
 from distiller import (clean_for_index, nav_junk_ratio, distill_chunks,  # noqa: E402
-                       PROVIDERS, DEFAULT_PROVIDER)
+                       distill_chunks_cached, PROVIDERS, DEFAULT_PROVIDER)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger("kb2.loader")
@@ -582,8 +582,8 @@ def process_folder(folder_key: str, dry_run: bool = False, limit: Optional[int] 
 
         distills: List[Dict[str, Any]] = []
         if use_distill and not dry_run:
-            distills = distill_chunks([ch["text"] for ch in chunks],
-                                      provider=distill_provider)
+            distills = distill_chunks_cached([ch["text"] for ch in chunks],
+                                             provider=distill_provider)
             kept_pairs = [(ch, d) for ch, d in zip(chunks, distills)
                           if not d.get("is_junk")]
             junk_n = len(chunks) - len(kept_pairs)
