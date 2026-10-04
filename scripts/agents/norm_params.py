@@ -1569,6 +1569,19 @@ def lint_legal(text: str) -> List[str]:
         issues.append(f"🟡 OPEN RATE НЕ ГЛАВНЫЙ: «{frag}» — открываемость искажается "
                       f"почтовыми клиентами. Главная метрика — квалифицированные "
                       f"лиды и экономика, open rate — диагностика доставки")
+    # AI_JARGON: технический жаргон в бизнес-статье (словарь ai_for_business)
+    for m in list(re.finditer(
+            r"\bRAG\b|embedding\w*|chunking|\bMCP\b|\bLLM\b|"
+            r"промпт[- ]инжинир\w*|prompt[- ]engineering|"
+            r"векторн\w+\s+(?:баз|поиск|хранилищ)|reranking|реранкинг|"
+            r"fine-?tuning|\bHITL\b", text, re.I))[:2]:
+        window = text[max(0, m.start() - 150):m.end() + 200]
+        if not re.search(r"то\s+есть|проще\s+говоря|иными\s+словами|"
+                         r"это\s+значит", window, re.I):
+            frag = text[max(0, m.start() - 15):m.end() + 25].replace("\n", " ")
+            issues.append(f"🟡 AI-ЖАРГОН: «{frag}» — переведи в бизнес-язык "
+                          f"(словарь ai_for_business) или объясни одним "
+                          f"предложением и свяжи с эффектом")
     # SEGMENT_BEFORE_SEQUENCE: универсальная цепочка без сегмента
     for m in list(re.finditer(
             r"(?:универсальн\w+|един\w+|общ\w+)\s+(?:цепочк\w+|сери\w+\s+писем|"

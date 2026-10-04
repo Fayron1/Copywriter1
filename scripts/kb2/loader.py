@@ -145,6 +145,12 @@ FOLDERS: Dict[str, Dict[str, Any]] = {
         "source_type": "case", "snapshot_ttl": 365, "recursive": True,
         "label": "📚 Кейсы B2B РФ",
     },
+    "business/marketing/ai_for_business": {
+        # Слой «ИИ на языке бизнеса»: словарь перевода, режимы, use cases.
+        "agents": ["heart", "booster", "engineer"], "chunk": "guide",
+        "source_type": "etalon", "recursive": True, "distill": True,
+        "label": "🤖 ИИ для бизнеса",
+    },
     "business/marketing/consumer_psychology": {
         # Барден и выжимки: психология покупки — КАК писать офферы и хуки,
         # не факты для фактчека.
