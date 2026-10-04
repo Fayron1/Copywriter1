@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from distiller import nav_junk_ratio, distill_chunks  # noqa: E402
+from distiller import nav_junk_ratio, distill_chunks, DEFAULT_PROVIDER  # noqa: E402
 from loader import COLLECTION, get_client  # noqa: E402
 
 from qdrant_client.models import FieldCondition, Filter, MatchAny  # noqa: E402
@@ -46,6 +46,8 @@ def main() -> int:
     ap.add_argument("--domains", default=None,
                     help="через запятую; по умолчанию все домены коллекции")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--provider", default=DEFAULT_PROVIDER,
+                    help="openai | deepseek")
     args = ap.parse_args()
 
     client = get_client()
@@ -82,7 +84,7 @@ def main() -> int:
     B = 16  # чанков на LLM-батч (~16 × 800 симв ≈ 3.5k токенов)
     for i in range(0, len(cand_texts), B):
         batch = cand_texts[i:i + B]
-        marks = distill_chunks(batch)
+        marks = distill_chunks(batch, provider=args.provider)
         for pid, m in zip(cand_ids[i:i + B], marks):
             if m.get("is_junk"):
                 confirmed.append(pid)

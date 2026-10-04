@@ -40,7 +40,8 @@ if str(SCRIPTS) not in sys.path:
 
 from copywriter_kb.parsers import extract_text  # noqa: E402
 from embedding_system.local_embeddings import embed, get_dim  # noqa: E402
-from distiller import clean_for_index, nav_junk_ratio, distill_chunks, DISTILL_MODEL  # noqa: E402
+from distiller import (clean_for_index, nav_junk_ratio, distill_chunks,  # noqa: E402
+                       PROVIDERS, DEFAULT_PROVIDER)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger("kb2.loader")
@@ -522,7 +523,8 @@ def collect_files(folder_key: str) -> List[Path]:
 
 def process_folder(folder_key: str, dry_run: bool = False, limit: Optional[int] = None,
                    client=None, files_filter: Optional[str] = None,
-                   force_distill: bool = False) -> Dict[str, int]:
+                   force_distill: bool = False,
+                   distill_provider: str = DEFAULT_PROVIDER) -> Dict[str, int]:
     cfg = FOLDERS[folder_key]
     folder = KB_ROOT / folder_key
     stats = {"files": 0, "chunks": 0, "uploaded": 0, "skipped": 0, "chars": 0,
@@ -547,7 +549,7 @@ def process_folder(folder_key: str, dry_run: bool = False, limit: Optional[int] 
         files = files[:limit]
     use_distill = force_distill or bool(cfg.get("distill"))
     logger.info(f"   файлов: {len(files)}, стратегия чанков: {cfg['chunk']}"
-                f"{', дистилляция ' + DISTILL_MODEL if use_distill else ''}")
+                f"{', дистилляция ' + PROVIDERS[distill_provider]['model'] if use_distill else ''}")
 
     pending_points: List[Dict[str, Any]] = []
 
@@ -573,7 +575,8 @@ def process_folder(folder_key: str, dry_run: bool = False, limit: Optional[int] 
 
         distills: List[Dict[str, Any]] = []
         if use_distill and not dry_run:
-            distills = distill_chunks([ch["text"] for ch in chunks])
+            distills = distill_chunks([ch["text"] for ch in chunks],
+                                      provider=distill_provider)
             kept_pairs = [(ch, d) for ch, d in zip(chunks, distills)
                           if not d.get("is_junk")]
             junk_n = len(chunks) - len(kept_pairs)
@@ -716,6 +719,8 @@ def main() -> int:
     ap.add_argument("--list", action="store_true", help="показать, что видит загрузчик")
     ap.add_argument("--distill", action="store_true",
                     help="принудительная LLM-дистилляция (иначе по cfg distill)")
+    ap.add_argument("--provider", default=DEFAULT_PROVIDER,
+                    help="провайдер дистилляции: openai | deepseek")
     args = ap.parse_args()
 
     if args.list:
@@ -733,7 +738,7 @@ def main() -> int:
     totals = {"files": 0, "chunks": 0, "uploaded": 0, "skipped": 0}
     for key in targets:
         st = process_folder(key, dry_run=args.dry_run, limit=args.limit,
-                            force_distill=args.distill,
+                            force_distill=args.distill, distill_provider=args.provider,
                             client=client, files_filter=args.files)
         for k in totals:
             totals[k] += st[k]
