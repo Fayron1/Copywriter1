@@ -24,6 +24,7 @@ DIRECTION_BOOST_PREFIXES: Dict[str, List[str]] = {
     "налоги": [
         "legislation/НК_", "legislation/Налогов",
         "legislation/Закупки_ГК_РФ",
+        "business/reference/УСН_ставки", "business/reference/Производственный",
     ],
     "трудовое": [
         "legislation/Изменения_трудового", "legislation/КЭДО",
@@ -35,6 +36,11 @@ DIRECTION_BOOST_PREFIXES: Dict[str, List[str]] = {
     "маркетинг": [
         "business/marketplaces", "business/unit_economics",
         "business/marketing",
+    ],
+    "реклама": [
+        "legislation/ФЗ-38", "legislation/КоАП",
+        "business/marketing/paid_traffic_russia",
+        "business/marketing/ai_for_business",
     ],
 }
 
