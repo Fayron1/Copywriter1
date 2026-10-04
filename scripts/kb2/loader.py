@@ -94,6 +94,7 @@ FOLDERS: Dict[str, Dict[str, Any]] = {
     },
     "craft/writing": {
         "agents": ["heart", "engineer"], "chunk": "book", "source_type": "book",
+        "distill": True,
         "label": "✍️ Письмо (Писатель)",
     },
     "craft/editorial": {
