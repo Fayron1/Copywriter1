@@ -602,7 +602,8 @@ def process_folder(folder_key: str, dry_run: bool = False, limit: Optional[int] 
     # этой папки ДО заливки: перезаливка файла = чистая замена.
     if files_filter is None and not dry_run:
         try:
-            from qdrant_client.models import Filter, FieldCondition, MatchAny, FilterSelector
+            from qdrant_client.models import (Filter, FieldCondition, MatchAny,
+                                              MatchValue, FilterSelector)
             stale_flt = Filter(must=[
                 FieldCondition(key="domain", match=MatchValue(value=folder_key)),
                 FieldCondition(key="source_file", match=MatchAny(any=live_sources)),
