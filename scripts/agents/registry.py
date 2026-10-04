@@ -216,6 +216,10 @@ AGENTS: Dict[str, AgentConfig] = {
             payload_fields=[
                 "text", "source_file", "source_type", "chunk_type",
                 "distilled_concept", "distilled_application",
+                # valid_until включает в query_knowledge фильтр свежести:
+                # engineer строит P&L по тарифам маркетплейсов — протухший
+                # снимок комиссии в модели хуже его отсутствия.
+                "valid_until",
             ],
         ),
     ),

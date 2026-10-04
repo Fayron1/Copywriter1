@@ -114,6 +114,47 @@ FOLDERS: Dict[str, Dict[str, Any]] = {
         "agents": ["booster", "engineer"], "chunk": "book", "source_type": "book",
         "label": "📈 Маркетинг",
     },
+    # ── Подпапки маркетинга (2026-10-04): рекурсивный сбор, свои правила. ──
+    # Снимки платформ = ФАКТЫ (fact_finder), методологии = корм booster/engineer.
+    "business/marketing/paid_traffic_russia": {
+        "agents": ["fact_finder", "engineer", "booster"], "chunk": "guide",
+        "source_type": "snapshot", "snapshot_ttl": 90, "recursive": True,
+        "label": "🚦 Paid-traffic РФ (ЯД/VK/TG)",
+    },
+    "business/marketing/crm_and_sales_automation": {
+        "agents": ["fact_finder", "engineer", "booster"], "chunk": "guide",
+        "source_type": "snapshot", "snapshot_ttl": 180, "recursive": True,
+        "label": "📇 CRM и автоворонки",
+    },
+    "business/marketing/landing_pages_cro": {
+        "agents": ["fact_finder", "engineer", "booster"], "chunk": "guide",
+        "source_type": "snapshot", "snapshot_ttl": 180, "recursive": True,
+        "label": "🎯 Лендинги и CRO",
+    },
+    "business/marketing/b2b_email": {
+        "agents": ["fact_finder", "engineer", "booster"], "chunk": "guide",
+        "source_type": "etalon", "recursive": True,
+        "label": "✉️ B2B email",
+    },
+    "business/marketing/b2b_content_cases_russia": {
+        "agents": ["fact_finder", "booster"], "chunk": "guide",
+        "source_type": "case", "snapshot_ttl": 365, "recursive": True,
+        "label": "📚 Кейсы B2B РФ",
+    },
+    "business/marketing/consumer_psychology": {
+        # Барден и выжимки: психология покупки — КАК писать офферы и хуки,
+        # не факты для фактчека.
+        "agents": ["heart", "booster"], "chunk": "book",
+        "source_type": "book", "recursive": True,
+        "label": "🧠 Психология покупки",
+    },
+    "craft/persuasion": {
+        # Чалдини, Канеман, Талер и пр.: влияние и поведенческая экономика —
+        # КАК писать убедительно (Heart/Booster), не доменные факты.
+        "agents": ["heart", "booster"], "chunk": "book", "source_type": "book",
+        "recursive": True,
+        "label": "🎣 Убеждение (persuasion)",
+    },
     "business/marketplaces": {
         # Тарифные снимки, оферты и регламенты WB/Ozon: точечные факты для
         # fact_finder (комиссии, КВВ, даты вступления) и engineer (P&L-модели).
@@ -300,6 +341,28 @@ def year_meta(filename: str) -> Dict[str, Any]:
     return {"published_year": year, "valid_until": f"{year + 1}-12-31"}
 
 
+SNAPSHOT_RE = re.compile(r"снимок[_ ](\d{4}-\d{2}-\d{2})", re.I)
+
+
+def snapshot_meta(filename: str, ttl_days: int) -> Dict[str, Any]:
+    """Дата снимка из имени файла -> checked_at + valid_until (+ttl дней).
+
+    Платформенные гайды портятся быстрее отчётов: тарифы ЯД/VK — 90 дней,
+    справки CRM/CRO — 180, кейсы — 365 (факт проекта не устаревает,
+    устаревает его применимость).
+    """
+    m = SNAPSHOT_RE.search(filename)
+    if not m:
+        return {}
+    import datetime
+    try:
+        checked = datetime.date.fromisoformat(m.group(1))
+    except ValueError:
+        return {}
+    return {"checked_at": checked.isoformat(),
+            "valid_until": (checked + datetime.timedelta(days=ttl_days)).isoformat()}
+
+
 def point_id(source_rel: str, chunk_index: int, chash: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"{COLLECTION}|{source_rel}|{chunk_index}|{chash}"))
 
@@ -335,6 +398,7 @@ def ensure_collection(client, recreate: bool = False) -> None:
     try:
         info = client.get_collection(COLLECTION)
         logger.info(f"✅ Коллекция {COLLECTION} существует: {info.points_count} точек")
+        _ensure_payload_indexes(client)
         return
     except Exception:
         pass
@@ -349,6 +413,28 @@ def ensure_collection(client, recreate: bool = False) -> None:
     )
     logger.info(f"📦 Создана коллекция {COLLECTION} "
                 f"(dense dim={get_dim()} + sparse гибрид, локальные e5)")
+    _ensure_payload_indexes(client)
+
+
+def _ensure_payload_indexes(client) -> None:
+    """Payload-индексы под фактические фильтры retrieval (рекомендация
+    Qdrant для предфильтрации). Идемпотентно, ошибки не фатальны."""
+    from qdrant_client.models import PayloadSchemaType
+    for field_name, schema in (
+        ("agent_target", PayloadSchemaType.KEYWORD),
+        ("domain", PayloadSchemaType.KEYWORD),
+        ("source_type", PayloadSchemaType.KEYWORD),
+        ("valid_until", PayloadSchemaType.KEYWORD),
+        ("kb_layer", PayloadSchemaType.KEYWORD),
+    ):
+        try:
+            client.create_payload_index(
+                collection_name=COLLECTION,
+                field_name=field_name,
+                field_schema=schema,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"payload index {field_name}: {e}")
 
 
 def upload(client, points: List[Dict[str, Any]]) -> int:
@@ -409,6 +495,27 @@ def prune_folder(client, folder_key: str, live_sources: List[str]) -> int:
 # Обработка
 # ============================================================
 
+def collect_files(folder_key: str) -> List[Path]:
+    """Файлы папки по правилам FOLDERS: flat по умолчанию, рекурсия
+    (с исключением более специфичных ключей) — по флагу recursive."""
+    cfg = FOLDERS[folder_key]
+    folder = KB_ROOT / folder_key
+    if not folder.exists():
+        return []
+    flat = [f for f in folder.iterdir()
+            if f.is_file() and f.suffix.lower() in SUPPORTED]
+    if not cfg.get("recursive"):
+        return sorted(flat)
+    child_keys = [k for k in FOLDERS
+                  if k != folder_key and k.startswith(folder_key.rstrip("/") + "/")]
+    child_dirs = [KB_ROOT / k for k in child_keys]
+    return sorted(
+        f for f in folder.rglob("*")
+        if f.is_file() and f.suffix.lower() in SUPPORTED
+        and not any(f.is_relative_to(d) for d in child_dirs)
+    )
+
+
 def process_folder(folder_key: str, dry_run: bool = False, limit: Optional[int] = None,
                    client=None, files_filter: Optional[str] = None) -> Dict[str, int]:
     cfg = FOLDERS[folder_key]
@@ -420,8 +527,7 @@ def process_folder(folder_key: str, dry_run: bool = False, limit: Optional[int] 
         logger.warning("   папка не найдена")
         return stats
 
-    files = sorted(f for f in folder.iterdir()
-                   if f.is_file() and f.suffix.lower() in SUPPORTED)
+    files = collect_files(folder_key)
     if files_filter:
         # Точечная дозагрузка: glob-паттерн по имени файла (например
         # «Минфин_письмо*»), чтобы не пересчитывать всю папку ради
@@ -448,14 +554,22 @@ def process_folder(folder_key: str, dry_run: bool = False, limit: Optional[int] 
             stats["skipped"] += 1
             continue
 
-        source_rel = f"{folder_key}/{f.name}"
-        meta_extra = year_meta(f.name) if cfg.get("report") else {}
+        rel = f.relative_to(folder).as_posix()
+        source_rel = f"{folder_key}/{rel}"
+        meta_extra: Dict[str, Any] = {}
+        if cfg.get("report"):
+            meta_extra.update(year_meta(f.name))
+        if cfg.get("snapshot_ttl"):
+            meta_extra.update(snapshot_meta(f.name, cfg["snapshot_ttl"]))
 
         for idx, ch in enumerate(chunks):
             payload: Dict[str, Any] = {
                 "text": ch["text"],
                 "source_file": source_rel,
                 "domain": folder_key,
+                # Слой знаний: fact = ЧТО писать (доменные данные),
+                # craft = КАК писать (ремесло, стиль, убеждение).
+                "kb_layer": "craft" if folder_key.startswith(("craft/", "style_client")) else "fact",
                 "agent_target": list(cfg["agents"]),
                 "source_type": cfg["source_type"],
                 "chunk_index": idx,
@@ -480,7 +594,7 @@ def process_folder(folder_key: str, dry_run: bool = False, limit: Optional[int] 
     if dry_run or not pending_points:
         return stats
 
-    live_sources = [f"{folder_key}/{f.name}" for f in files]
+    live_sources = [f"{folder_key}/{f.relative_to(folder).as_posix()}" for f in files]
 
     # ФИКС (аудит 🟡18, 2026-10-02): uuid5 включает content_hash — обновлённый
     # файл получает новые ID, а старые чанки остаются висеть (prune смотрит
@@ -554,10 +668,9 @@ def main() -> int:
 
     if args.list:
         for key, cfg in FOLDERS.items():
-            folder = KB_ROOT / key
-            files = [f for f in folder.iterdir() if f.suffix.lower() in SUPPORTED] if folder.exists() else []
+            files = collect_files(key)
             total = sum(f.stat().st_size for f in files) / 1048576
-            print(f"{cfg['label']:32s} {key:24s} {len(files):3d} файлов {total:8.1f} МБ")
+            print(f"{cfg['label']:34s} {key:44s} {len(files):3d} файлов {total:8.1f} МБ")
         return 0
 
     client = None if args.dry_run else get_client()
