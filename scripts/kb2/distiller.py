@@ -289,15 +289,16 @@ def apply_out_files() -> int:
 
 
 def distill_chunks_cached(chunks: list, provider: str = DEFAULT_PROVIDER) -> list:
-    """distill_chunks с кэшем: что есть в кэше — берём, остальное — LLM."""
+    """distill_chunks с кэшем: что есть в кэше — берём, остальное — LLM.
+    chunks — список СТРОК (текстов чанков), не словарей."""
     import hashlib
     cache = load_cache()
-    hashes = [hashlib.md5(re.sub(r"[\s\W]+", "", c["text"].lower())
+    hashes = [hashlib.md5(re.sub(r"[\s\W]+", "", c.lower())
                           .encode("utf-8")).hexdigest() for c in chunks]
     marks = [cache.get(h) for h in hashes]
     missing_idx = [i for i, m in enumerate(marks) if m is None]
     if missing_idx:
-        llm = distill_chunks([chunks[i]["text"] for i in missing_idx],
+        llm = distill_chunks([chunks[i] for i in missing_idx],
                              provider=provider)
         for i, m in zip(missing_idx, llm):
             marks[i] = m
