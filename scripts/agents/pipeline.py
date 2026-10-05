@@ -2606,8 +2606,11 @@ class Pipeline:
             # Текущий черновик только что получил свежую оценку — он больше не "неоценённый".
             pending_unscored_patch = False
                 
-            if (response.get("approved") == True and score >= 85) or score >= 90 or not edits:
-                logger.info(f"      ✅ Ревизор одобрил статью (балл {score} >= 85 и approved=True).")
+            # ФИКС (статья 35): «not edits» при низком балле открывал гейт —
+            # Ревизор вернул approved=True + score=58 без правок, и черновик
+            # был принят. Одобрение только через порог балла.
+            if (response.get("approved") == True and score >= 85) or score >= 90:
+                logger.info(f"      ✅ Ревизор одобрил статью (балл {score}, approved={response.get('approved')}).")
                 break
                 
             # Фильтруем правки с учетом памяти одобренных/замороженных разделов
