@@ -579,7 +579,13 @@ def main() -> int:
             if daily_due(state, "pravo_last_check") and datetime.now().hour >= 9:
                 daily_pravo_check(state)
             if AMENDMENT_WATCH_ENABLED and daily_due(state, "watch_last_check") and datetime.now().hour >= 9:
-                daily_amendment_watch(state)
+                # Аудит-1: Vane-исследование занимает минуты сети и блокировало
+                # long-poll. Запуск в фоновом потоке на копии state.
+                _st2 = dict(state)
+                threading.Thread(target=daily_amendment_watch, args=(_st2,),
+                                 daemon=True).start()
+                state["watch_last_check"] = datetime.now().strftime("%Y-%m-%d")
+                save_state(state)
             if daily_due(state, "expiry_last_check") and datetime.now().hour >= 9:
                 daily_expiry_check(state)
         except Exception as e:

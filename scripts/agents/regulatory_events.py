@@ -62,6 +62,27 @@ REGULATORY_EVENTS = [
                 "20 млн до 31.12.2027",
     },
     {
+        "id": "vat_usn_thresholds_schedule",
+        "date": "2027-2028",
+        "date_rx": r"20[278]",
+        "domain": "налоги",
+        "entities": ["15\s*млн", "10\s*млн", "15\s+миллион", "10\s+миллион"],
+        "status": "enacted_future",  # 269-ФЗ: календарь порогов установлен законом
+        "claim_status": "future_enacted_rule",  # можно писать «вступит в силу с...»
+        "note": "порог освобождения от НДС: 20 млн (2026) → 15 млн (2027) → "
+                "10 млн (2028) — график установлен принятым законом",
+    },
+    {
+        "id": "usn_limit_2027_projection",
+        "date": "2027",
+        "date_rx": r"2027",
+        "domain": "налоги",
+        "entities": ["490", "индексац"],
+        "status": "announced",  # проекция индексации — ФЗ НЕ опубликован
+        "claim_status": "proposal_only",  # только «в проекте обсуждалось»
+        "note": "порог УСН 2027 (~490,5 млн) — ожидаемая индексация, акт отсутствует",
+    },
+    {
         "id": "procurement_antidump_2026_01",
         "date": "1 января 2026",
         "date_rx": r"01\.01\.2026|1\s+января\s+2026",
@@ -101,4 +122,77 @@ def check_event_domain(text: str, direction: str) -> List[str]:
                 f"событие «{ev['date']}» ({dom}: {ev['note']}) к своему домену как "
                 f"обязательное. Проверьте, тот ли это дедлайн — у событий одной "
                 f"даты разные адресаты")
+    return issues
+
+
+_FUTURE_YEAR = re.compile(r"20(?:2[7-9]|[3-9]\d)")
+_CURRENT_ASSERT = re.compile(
+    r"состав\w+|действ\w+|установлен\w+|равн\w+|будет\s+(?:составля\w+|примен\w+)|"
+    r"порог\w*\s*(?:—|-)?\s*\d", re.I)
+# «ожидаем\w+» сознательно НЕ в списке: «ожидаемое значение» без акта —
+# именно ловушка статьи 36 (порог 490,5 млн). Честная маркировка проекта:
+# «в проекте изменений обсуждалось...; до опубликования использовать нельзя».
+_PROPOSAL_OK = re.compile(
+    r"проект\w*|обсуждал\w+|предлага\w+|может\s+быть\s+принят|"
+    r"до\s+опубликования|нельзя\s+использовать\s+для\s+расчёт\w*|"
+    r"не\s+является\s+действующ\w+|планируем\w+", re.I)
+
+
+def check_future_rules(text: str, direction: str = "") -> List[str]:
+    """EVENT_TO_TAX_START_DATE / amendment-шлюз (план фиксировщика, P1).
+
+    Утверждение с конкретной цифрой на БУДУЩИЙ год допускается только если:
+    - событие покрыто принятым законом (status enacted_future/in_force) —
+      тогда обязательна формулировка «вступит в силу с...»;
+    - статус announced/bill → только proposal_only («в проекте обсуждалось»).
+    Иначе — 🔴 FUTURE_RULE_WITHOUT_ACT: нет опубликованного акта.
+    """
+    issues: List[str] = []
+    if not text:
+        return issues
+    for raw_sentence in re.split(r"(?<=[.!?])\s+(?=[А-ЯЁ«])", text):
+        s = raw_sentence.strip()
+        if not s:
+            continue
+        if not _FUTURE_YEAR.search(s):
+            continue
+        if not re.search(r"ставк|лимит|порог|млн|₽|руб|составит", s, re.I):
+            continue
+        if _PROPOSAL_OK.search(s):
+            continue
+        # двухпроходное покрытие: proposal_only-событие = флаг,
+        # enacted-событие = чисто (можно «вступит в силу с...»)
+        proposal_hit = None
+        covered = False
+        for ev in REGULATORY_EVENTS:
+            st = ev.get("status")
+            if st not in ("enacted_future", "in_force", "mandatory", "amendments", "announced", "bill", "draft"):
+                continue
+            if not re.search(ev["date_rx"], s):
+                continue
+            if not any(re.search(e, s, re.I) for e in ev["entities"]):
+                continue
+            if st in ("announced", "bill", "draft"):
+                proposal_hit = ev
+                break
+            covered = True
+            break
+        if proposal_hit is not None:
+            issues.append(
+                f"🔴 FUTURE_RULE_WITHOUT_ACT: «{s[:120]}…» — «{proposal_hit['note']}». "
+                f"Допустимо только: «в проекте изменений обсуждался такой подход; до "
+                f"опубликования и вступления закона в силу его нельзя использовать "
+                f"для расчётов и планирования»")
+            if len(issues) >= 2:
+                break
+            continue
+        if covered:
+            continue
+        issues.append(
+            f"🔴 FUTURE_RULE_WITHOUT_ACT: «{s[:120]}…» — конкретная норма на будущий "
+            f"год без опубликованного акта. Допустимо только: «в проекте изменений "
+            f"обсуждался такой подход; до опубликования и вступления закона в силу "
+            f"его нельзя использовать для расчётов и планирования»")
+        if len(issues) >= 2:
+            break
     return issues

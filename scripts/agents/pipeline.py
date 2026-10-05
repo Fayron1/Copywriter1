@@ -4879,6 +4879,15 @@ class Pipeline:
             except Exception as e:
                 logger.warning(f"Калькуляторный гейт пропущен: {e}")
 
+        # AMENDMENT-ШЛЮЗ (план фиксировщика, P1): будущие нормы только с
+        # опубликованным актом. «Ожидаемый порог 2027» без акта = красный
+        # (кейс статьи 36), enacted-график 269-ФЗ разрешён.
+        try:
+            from .regulatory_events import check_future_rules
+            warnings.extend(check_future_rules(text, state.direction or ""))
+        except Exception as e:
+            logger.warning(f"Amendment-шлюз пропущен: {e}")
+
         # 1. Проверка длины
         target = state.custom_chars
         if not target:
