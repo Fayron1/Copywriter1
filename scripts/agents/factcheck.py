@@ -181,20 +181,37 @@ def _call_kie_generic(
 # ВАРИАНТ B: мульти-источниковая верификация фактов
 # ════════════════════════════════════════════════════════════
 _VERIFY_SYSTEM_PROMPT = (
-    "Ты — строгий верификатор фактов для деловых статей по налогам, праву и финансам РФ.\n"
-    "Тебе дают список ключевых фактов (ставки, лимиты, суммы, даты, номера статей закона).\n"
-    "Используя доступный тебе Google Search, проверь КАЖДЫЙ факт по нескольким независимым источникам.\n\n"
-    "ПРАВИЛА:\n"
-    "1. Приоритет — официальные и авторитетные ресурсы (nalog.gov.ru, pravo.gov.ru, Минфин,\n"
-    "   КонсультантПлюс, Гарант). СМИ и блоги — только как подтверждение.\n"
-    "2. Для каждого факта верни список реально найденных источников (title, url, snippet).\n"
-    "3. verdict:\n"
-    "   - 'verified' — факт подтверждён;\n"
-    "   - 'partial' — подтверждён частично / неточно сформулирован;\n"
-    "   - 'unverified' — не удалось подтвердить;\n"
-    "   - 'conflict' — источники противоречат друг другу.\n"
-    "4. НЕ выдумывай источники и URL. Если ничего не нашёл — пустой sources и verdict='unverified'.\n"
-    "5. Для conflict/unverified укажи correction — корректное значение, если удалось найти.\n"
+    "Ты — независимый фактчекер и юридико-редакционный аудитор для деловых статей\n"
+    "по налогам, праву, закупкам и финансам РФ.\n"
+    "Твоя задача — НЕ подтвердить качество фактов, а найти основания, по которым\n"
+    "утверждение нельзя безопасно публиковать. Режим adversarial review: ищи\n"
+    "исключения, неверную применимость, устаревшие данные, смешение режимов,\n"
+    "неподтверждённые цифры и логические скачки.\n\n"
+    "Используя доступный тебе Google Search, для КАЖДОГО утверждения ответь на ПЯТЬ вопросов:\n"
+    "1. Откуда это известно — есть ли первоисточник (nalog.gov.ru, pravo.gov.ru, Минфин,\n"
+    "   КонсультантПлюс, Гарант) и дата актуальности?\n"
+    "2. К кому это относится — какой субъект (ИП, ООО, работодатель, заказчик,\n"
+    "   поставщик, рекламодатель, оператор персональных данных)?\n"
+    "3. При каких условиях это верно — какой правовой/бизнес-режим (УСН, ОСНО, НПД,\n"
+    "   44-ФЗ, 223-ФЗ, трудовой договор, интернет-реклама) и какие условия должны совпасть?\n"
+    "4. Когда это НЕВЕРНО — какие исключения, переходные положения, специальные случаи?\n"
+    "   Ловушки: лимит УСН ≠ лимит НДС при УСН; техминимум рекламной площадки ≠ рабочий\n"
+    "   тестовый бюджет; норма для заказчика ≠ норма для поставщика; переходный период ≠\n"
+    "   отмена правила; письмо ведомства ≠ текст закона.\n"
+    "5. Не перепутано ли с похожим правилом — другой лимит, другой закон, другой орган,\n"
+    "   другая метрика, другой период, другой регион?\n\n"
+    "verdict (как раньше): verified | partial | unverified | conflict.\n"
+    "publication_status (итог adversarial-проверки):\n"
+    "   - 'OK' — можно публиковать как есть;\n"
+    "   - 'MEDIUM' — нужна оговорка (регион/сегмент/период/условие);\n"
+    "   - 'HIGH' — переформулировать с явными условиями применимости;\n"
+    "   - 'BLOCKER' — публиковать нельзя: неверная норма/дата/сумма/субъект/режим,\n"
+    "     опасный совет без условий, конфликт источников, нет первоисточника.\n"
+    "НЕ угадывай: если источник не найден или источники конфликтуют — ставь\n"
+    "publication_status='BLOCKER' и опиши в needs_manual_check, что проверять вручную.\n"
+    "Для каждого утверждения заполни карточку применимости: subject, regime,\n"
+    "applies_when, does_not_apply_when, exceptions, numeric_scope.\n"
+    "Если поле неприменимо к типу утверждения — пустая строка."
 )
 
 _VERIFY_SCHEMA = {
@@ -214,6 +231,14 @@ _VERIFY_SCHEMA = {
                             "verdict": {"type": "string", "description": "verified | partial | unverified | conflict"},
                             "confidence": {"type": "number"},
                             "correction": {"type": "string", "description": "Корректное значение, если факт ошибочен"},
+                            "subject": {"type": "string", "description": "Субъект нормы/утверждения (ИП, ООО, работодатель...)"},
+                            "regime": {"type": "string", "description": "Правовой/бизнес-режим (УСН, ОСНО, 44-ФЗ...)"},
+                            "applies_when": {"type": "string", "description": "Когда утверждение применимо"},
+                            "does_not_apply_when": {"type": "string", "description": "Когда НЕ применимо"},
+                            "exceptions": {"type": "string", "description": "Исключения и переходные положения"},
+                            "numeric_scope": {"type": "string", "description": "Область действия числа (регион/период/сегмент/тариф)"},
+                            "publication_status": {"type": "string", "description": "OK | MEDIUM | HIGH | BLOCKER"},
+                            "needs_manual_check": {"type": "string", "description": "Что требует ручной проверки при BLOCKER"},
                             "sources": {
                                 "type": "array",
                                 "items": {
@@ -311,6 +336,7 @@ def verify_facts(facts: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     out: Dict[str, Dict[str, Any]] = {}
     verified_count = 0
     hedged_count = 0
+    blocker_count = 0
 
     for r in results:
         if not isinstance(r, dict):
@@ -340,11 +366,16 @@ def verify_facts(facts: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
 
         hard_verified = len(clean_sources) >= min_sources and len(domains) >= min_domains
         # needs_hedging: НЕ прошёл жёсткий фильтр ИЛИ модель сказала conflict/unverified
-        needs_hedging = (not hard_verified) or verdict in ("conflict", "unverified", "partial")
+        # ИЛИ adversarial-проверка дала BLOCKER (нельзя публиковать без правки)
+        pub_status = str(r.get("publication_status", "")).strip().upper()
+        needs_hedging = (not hard_verified) or verdict in ("conflict", "unverified", "partial") \
+            or pub_status == "BLOCKER"
         if not needs_hedging:
             verified_count += 1
         else:
             hedged_count += 1
+        if pub_status == "BLOCKER":
+            blocker_count += 1
 
         out[_normalize_claim(claim)] = {
             "claim": claim,
@@ -354,11 +385,20 @@ def verify_facts(facts: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
             "sources": clean_sources,
             "domains": sorted(domains),
             "needs_hedging": needs_hedging,
+            # Карточка применимости (adversarial-протокол, 2026-10-05)
+            "subject": str(r.get("subject", "") or "").strip(),
+            "regime": str(r.get("regime", "") or "").strip(),
+            "applies_when": str(r.get("applies_when", "") or "").strip(),
+            "does_not_apply_when": str(r.get("does_not_apply_when", "") or "").strip(),
+            "exceptions": str(r.get("exceptions", "") or "").strip(),
+            "numeric_scope": str(r.get("numeric_scope", "") or "").strip(),
+            "publication_status": pub_status or ("BLOCKER" if needs_hedging and not hard_verified and verdict in ("conflict", "unverified") else ""),
+            "needs_manual_check": str(r.get("needs_manual_check", "") or "").strip(),
         }
 
     logger.info(
         f"   ✅ [factcheck] проверено {len(out)} фактов: "
-        f"verified={verified_count}, needs_hedging={hedged_count} "
+        f"verified={verified_count}, needs_hedging={hedged_count}, BLOCKER={blocker_count} "
         f"(критерий: ≥{min_sources} ист. из ≥{min_domains} доменов)"
     )
     return out

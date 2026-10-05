@@ -117,6 +117,15 @@ def extract_claims(facts: Dict[str, Any], topic: str = "") -> List[Dict[str, Any
             "matched_patterns": matched,
             "allowed_wording": [],
             "forbidden_wording": [],
+            # Карточка применимости (adversarial-протокол, 2026-10-05):
+            # Fact-Finder может заполнить, верификатор — уточнить.
+            "subject": fact.get("subject", ""),
+            "regime": fact.get("regime", ""),
+            "applies_when": fact.get("applies_when", ""),
+            "does_not_apply_when": fact.get("does_not_apply_when", ""),
+            "exceptions": fact.get("exceptions", ""),
+            "numeric_scope": fact.get("numeric_scope", ""),
+            "publication_status": "",
         }
 
         # Низкая надёжность → insufficient
@@ -189,6 +198,20 @@ def build_claim_pack(claims: List[Dict], calculations: Optional[List] = None) ->
 
     for c in approved:
         lines.append(f"[{c['claim_id']}] {c['text']}")
+        # Развилка применимости (adversarial-протокол): Heart пишет выбор,
+        # а не универсальное правило.
+        if c.get("subject"):
+            lines.append(f"  Субъект: {c['subject']}")
+        if c.get("regime"):
+            lines.append(f"  Режим: {c['regime']}")
+        if c.get("applies_when"):
+            lines.append(f"  Применимо когда: {c['applies_when']}")
+        if c.get("does_not_apply_when"):
+            lines.append(f"  НЕ применимо когда: {c['does_not_apply_when']}")
+        if c.get("exceptions"):
+            lines.append(f"  Исключения: {c['exceptions']}")
+        if c.get("numeric_scope"):
+            lines.append(f"  Область числа: {c['numeric_scope']}")
         if c.get("conditions"):
             lines.append(f"  Условия: {'; '.join(c['conditions'])}")
         if c.get("allowed_wording"):
