@@ -2591,12 +2591,19 @@ class Pipeline:
                 "- Штампы без конкретики («важно понимать», «играет ключевую роль», «следует учитывать») — правка: заменить на конкретное действие/условие/метрику.\n\n"
                 "Формат ответа СТРОГО JSON:\n"
                 "{\n"
-                "  \"approved\": false,  // true, если статья не требует доработки и полностью соответствует всем требованиям\n"
+                "  \"approved\": false,  // true ТОЛЬКО если нет ни одного рискованного утверждения и правок\n"
                 "  \"score\": 85,        // оценка статьи от 0 до 100\n"
+                "  \"top_5_risky_claims\": [  // ОБЯЗАТЕЛЬНО: топ самых рискованных утверждений статьи\n"
+                "    {\"claim_id\": \"L-001\", \"quote\": \"дословная цитата из статьи\", \"risk_reason\": \"почему рискованно\", \"required_proof\": \"что нужно для безопасной публикации\", \"publication_action\": \"ALLOW | REWRITE | REMOVE | BLOCK\"}\n"
+                "  ],\n"
                 "  \"edits\": [\n"
                 "    {\"section_index\": <индекс раздела>, \"reason\": \"почему нужна правка\", \"instruction\": \"что конкретно сделать в этом разделе\"}\n"
                 "  ]\n"
-                "}"
+                "}\n"
+                "ПРАВИЛА КОНТРАКТА (лень технически невозможна):\n"
+                "- top_5_risky_claims пуст ДОПУСТИМ только при approved=true и score>=85;\n"
+                "- нашёл рискованное утверждение без источника/условий/субъекта — оно ОБЯЗАНО попасть в top_5_risky_claims с publication_action != ALLOW;\n"
+                "- publication_action REWRITE/REMOVE/BLOCK без соответствующей записи в edits запрещён.\n"
             )
             
             user_msg = (
@@ -2625,6 +2632,35 @@ class Pipeline:
                 score = 0
                 
             edits = response.get("edits", [])
+
+            # Аудит-контракт (рекомендации фиксировщика, P0): лень технически
+            # невозможна. Риски с REWRITE/REMOVE/BLOCK без правок конвертируются
+            # в правки: цитата мапится на раздел по подстроке. Противоречие
+            # «approved + правки» запрещено.
+            risky = response.get("top_5_risky_claims") or []
+            blocking = [r for r in risky if isinstance(r, dict) and
+                        str(r.get("publication_action", "")).upper() in ("REWRITE", "REMOVE", "BLOCK")]
+            if blocking:
+                mapped = []
+                for r in blocking:
+                    q = str(r.get("quote", "")).strip()[:80]
+                    idx = next((i for i, b in enumerate(sections)
+                                if q and q[:40] in b.get("raw", "")), None)
+                    if idx is not None:
+                        mapped.append({
+                            "section_index": idx,
+                            "reason": str(r.get("risk_reason", ""))[:200],
+                            "instruction": (str(r.get("required_proof", "")) + " "
+                                            + str(r.get("publication_action", ""))).strip(),
+                        })
+                if mapped:
+                    edits = list(edits) + mapped
+                    if response.get("approved"):
+                        response["approved"] = False
+                        logger.info("      🛡️ approved противоречит рискам — отменён")
+                logger.info(f"      🛡️ Рискованных утверждений: {len(blocking)}, "
+                            f"сконвертировано в правки: {len(mapped)}")
+
             logger.info(f"      📈 Текущий балл: {score}/100. Найдено правок: {len(edits)}")
             
             if score > best_score:
