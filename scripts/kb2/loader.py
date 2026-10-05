@@ -222,6 +222,40 @@ FOLDERS: Dict[str, Dict[str, Any]] = {
     },
 }
 
+# ── Тематический ключ (payload topic): грубая гранулярность поверх domain ──
+# Маркетинг / копирайтинг / психология не смешиваются: по topic поиск и
+# агенты отличают «как писать» от «о чём писать» без перебора папок.
+# domain остаётся = папке (точная гранулярность), topic — coarse-фильтр.
+TOPICS: Dict[str, str] = {
+    "legislation": "law",
+    "craft/writing": "copywriting",
+    "craft/editorial": "copywriting",
+    "craft/structure": "copywriting",
+    "craft/seo": "seo",
+    "craft/visual": "visual",
+    "business/marketing": "marketing",
+    "business/marketing/paid_traffic_russia": "marketing",
+    "business/marketing/crm_and_sales_automation": "marketing",
+    "business/marketing/landing_pages_cro": "marketing",
+    "business/marketing/b2b_email": "marketing",
+    "business/marketing/b2b_content_cases_russia": "marketing",
+    "business/marketing/ai_for_business": "marketing",
+    "business/marketing/consumer_psychology": "psychology",
+    "craft/persuasion": "psychology",
+    "business/marketplaces": "business",
+    "business/methodology": "business",
+    "business/unit_economics": "business",
+    "business/finance": "business",
+    "business/reports": "reports",
+    "business/reference": "reference",
+    "style_client": "copywriting",
+    "style_client/чек_листы": "copywriting",
+    "style_client/ситуации": "copywriting",
+    "style_client/разбор_законов": "copywriting",
+    "style_client/полезное": "copywriting",
+    "style_client/актуальные_проблемы": "copywriting",
+}
+
 # Размеры чанков по стратегиям (символы)
 CHUNK_SIZES = {"law": 1500, "book": 900, "guide": 800, "reference": 700, "style": 1000}
 OVERLAP = 100
@@ -435,6 +469,7 @@ def _ensure_payload_indexes(client) -> None:
     for field_name, schema in (
         ("agent_target", PayloadSchemaType.KEYWORD),
         ("domain", PayloadSchemaType.KEYWORD),
+        ("topic", PayloadSchemaType.KEYWORD),
         ("source_type", PayloadSchemaType.KEYWORD),
         ("valid_until", PayloadSchemaType.KEYWORD),
         ("kb_layer", PayloadSchemaType.KEYWORD),
@@ -613,6 +648,7 @@ def process_folder(folder_key: str, dry_run: bool = False, limit: Optional[int] 
                 # Слой знаний: fact = ЧТО писать (доменные данные),
                 # craft = КАК писать (ремесло, стиль, убеждение).
                 "kb_layer": "craft" if folder_key.startswith(("craft/", "style_client")) else "fact",
+                "topic": TOPICS.get(folder_key, "business"),
                 "agent_target": list(cfg["agents"]),
                 "source_type": cfg["source_type"],
                 "chunk_index": idx,

@@ -167,7 +167,7 @@ AGENTS: Dict[str, AgentConfig] = {
             score_threshold=0.25,
             filters={"agent_target": "fact_finder"},
             payload_fields=[
-                "text", "source_file", "source_type",
+                "text", "source_file", "source_type", "topic",
                 "source_priority", "chunk_type",
                 "effective_date", "valid_until",
                 # Law-specific fields (для точной работы с нормативными актами):
@@ -216,6 +216,7 @@ AGENTS: Dict[str, AgentConfig] = {
             payload_fields=[
                 "text", "source_file", "source_type", "chunk_type",
                 "distilled_concept", "distilled_application",
+                "topic",
                 # valid_until включает в query_knowledge фильтр свежести:
                 # engineer строит P&L по тарифам маркетплейсов — протухший
                 # снимок комиссии в модели хуже его отсутствия.
@@ -244,7 +245,7 @@ AGENTS: Dict[str, AgentConfig] = {
             filters={"agent_target": "heart"},
             payload_fields=[
                 "text", "source_file", "source_type", "chunk_type",
-                "rhythm_type",
+                "rhythm_type", "topic",
             ],
         ),
     ),
@@ -267,7 +268,7 @@ AGENTS: Dict[str, AgentConfig] = {
             filters={"agent_target": "sheriff"},
             payload_fields=[
                 "text", "source_file", "source_type", "error_type",
-                "chunk_type",
+                "chunk_type", "topic",
             ],
         ),
     ),
@@ -309,7 +310,7 @@ AGENTS: Dict[str, AgentConfig] = {
             filters={"agent_target": "booster"},
             payload_fields=[
                 "text", "source_file", "source_type", "chunk_type",
-                "intent_type",
+                "intent_type", "topic",
             ],
         ),
     ),
