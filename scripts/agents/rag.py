@@ -361,6 +361,10 @@ def query_knowledge(
                                      limit=pool_limit,
                                      filter=search_filter,
                                      score_threshold=agent.rag.score_threshold),
+                            # Аудит-2 S2: у sparse НЕТ score_threshold сознательно —
+                            # BM25-скор имеет другую шкалу, чем косинус; общий порог
+                            # резал бы легитимные совпадения. Риск слабых хвостов
+                            # ограничен пулом и top_k.
                             Prefetch(
                                 query=SparseVector(**_q_sparse(q_text)),
                                 using="sparse",
@@ -411,6 +415,16 @@ def query_knowledge(
 
         ranked = sorted(merged.values(),
                         key=lambda e: e["rrf"], reverse=True)[:agent.rag.top_k]
+
+        # Аудит-2 S1: RRF-скор по построению мелкий (1/(60+rank) на формулировку),
+        # а потребители скора (topic_generator: пороги 0.60/0.45, отчётные метки
+        # ✓/~/✗) откалиброваны на косинусной шкале 0-1. Нормируем: идеальный
+        # топ во всех формулировках = 1.0. Порядок не меняется — шкала да.
+        if variant_vectors:
+            max_rrf = len(variant_vectors) * (1.0 / 60)
+            if max_rrf > 0:
+                for entry in ranked:
+                    entry["rrf"] = min(1.0, entry["rrf"] / max_rrf)
 
         chunks = []
         for entry in ranked:
