@@ -175,8 +175,10 @@ def _generation_worker(topic: str, cid: str) -> None:
         before = {d.name for d in OUTPUT_ROOT.iterdir() if d.is_dir()} if OUTPUT_ROOT.exists() else set()
         env = dict(os.environ)
         env["PYTHONUNBUFFERED"] = "1"
+        # Аудит-2 K1: автоотправка воркера отключена (--no-send) — иначе
+        # generate шлёт сам (через гейт), а воркер слал ВТОРОЙ ZIP мимо гейта.
         cmd = [str(VENV_PYTHON), str(SCRIPTS / "generate.py"), topic,
-               "--chars", "8000", "-p", "deepseek"]
+               "--chars", "8000", "-p", "deepseek", "--no-send"]
         logger.info(f"[gen] старт: {topic[:80]}")
         proc = subprocess.run(cmd, cwd=str(PROJECT), capture_output=True, text=True,
                               timeout=3600, env=env, encoding="utf-8", errors="replace")
@@ -185,6 +187,20 @@ def _generation_worker(topic: str, cid: str) -> None:
             tail = (proc.stdout or "")[-500:] + (proc.stderr or "")[-500:]
             tg_call("sendMessage", chat_id=cid,
                     text=f"❌ Генерация не удалась (код {proc.returncode}).\n{tail[-700:]}")
+            return
+        # Аудит-2 K1: собственный ZIP воркера проходит тот же красный гейт,
+        # что и автоотправка. Красные замечания = статья не уходит.
+        sys.path.insert(0, str(SCRIPTS))
+        from agents.autofix_gate import gate, fix_dir
+        fix_dir(str(out_dir))
+        reds = gate((out_dir / "article.md").read_text(encoding="utf-8"),
+                    str(out_dir / "gate_markers.json"))
+        if reds:
+            red_lines = "\n".join("• " + str(x)[:140] for x in reds[:4])
+            tg_call("sendMessage", chat_id=cid,
+                    text=(f"🔴 ГЕЙТ: {len(reds)} красных замечаний — статья не "
+                          f"отправлена, нужна правка:\n{red_lines}"))
+            logger.warning(f"[gen] гейт заблокировал отправку: {len(reds)} красных")
             return
         zip_path = PROJECT / f"article_{out_dir.name[:40]}.zip"
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -402,7 +418,9 @@ def daily_expiry_check(state: Dict[str, str]) -> None:
             rng = models.DatetimeRange(lt=today)
         except AttributeError:
             rng = models.Range(lt=today)
-        flt = Filter(must=[FieldCondition(key="valid_until", range=rng)])
+        # Аудит-2 N2: Filter/FieldCondition не импортированы поимённо ->
+        # NameError глотался except-ом, expiry check был мёртв.
+        flt = models.Filter(must=[models.FieldCondition(key="valid_until", range=rng)])
         count = client.count(collection_name=collection, count_filter=flt, exact=True).count
         if count:
             notify(f"🕒 {count} точек отчётов устарели (valid_until < {today}) — из поиска они уже исключены фильтром.")
