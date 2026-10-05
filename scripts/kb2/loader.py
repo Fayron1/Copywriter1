@@ -151,6 +151,15 @@ FOLDERS: Dict[str, Dict[str, Any]] = {
         "source_type": "etalon", "recursive": True, "distill": True,
         "label": "🤖 ИИ для бизнеса",
     },
+    "business/marketing/b2b_growth_playbooks": {
+        # Плейбуки роста (ревью 33, 2026-10-05): реактивация, прогрев, каналы,
+        # матрица выбора каналов. Проверяемые плейбуки с предусловиями,
+        # метриками, стоп-условиями и what_not_to_claim — НЕ универсальные
+        # законы. Дистилляция отключена до пополнения баланса LLM.
+        "agents": ["engineer", "booster", "heart"], "chunk": "guide",
+        "source_type": "etalon", "recursive": True,
+        "label": "📚 B2B Growth Playbooks",
+    },
     "business/marketing/consumer_psychology": {
         # Барден и выжимки: психология покупки — КАК писать офферы и хуки,
         # не факты для фактчека.
