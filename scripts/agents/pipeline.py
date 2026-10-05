@@ -1687,6 +1687,9 @@ class Pipeline:
         # Claim Pack идёт ПЕРВЫМ (выше калькулятора, параметров и RAG) —
         # это ЕДИНСТВЕННЫЙ источник фактов для Heart
         _claim_pack = getattr(state, "claim_pack", "")
+        # Аудит-фикс (P0, CALCULATION_TRACE_REQUIRED): одобренный блок
+        # калькуляторов сохраняется для гейта сверки таблиц в черновике.
+        state.approved_calc_block = calc_block
         if _claim_pack:
             rag_block = _claim_pack + "\n" + calc_block + rag_block
             logger.info("   📋 Claim Pack внедрён в контекст Heart")
@@ -4863,6 +4866,18 @@ class Pipeline:
                     warnings.append(issue)
             except Exception as e:
                 logger.warning(f"Сверка параметров пропущена: {e}")
+
+        # CALCULATION_TRACE_REQUIRED (план фиксировщика, P0): нагрузочные
+        # таблицы сверяются с одобренным блоком калькуляторов. Число вне
+        # одобренных расчётов = красный флаг (кейс статьи 36: ОСНО 4,68 млн).
+        _approved = getattr(state, "approved_calc_block", "")
+        if _approved:
+            try:
+                from .calc_gate import check_calc_trace, check_calc_claims
+                warnings.extend(check_calc_trace(text, _approved))
+                warnings.extend(check_calc_claims(text))
+            except Exception as e:
+                logger.warning(f"Калькуляторный гейт пропущен: {e}")
 
         # 1. Проверка длины
         target = state.custom_chars
