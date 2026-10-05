@@ -44,6 +44,49 @@ DIRECTION_BOOST_PREFIXES: Dict[str, List[str]] = {
     ],
 }
 
+# Топик-буст: маркеры в тексте запроса → topic чанка. Дополняет
+# DIRECTION_BOOST_PREFIXES: direction известен заранее (домен статьи),
+# маркеры ловят тему внутри самого запроса агента («как писать заголовки»
+# должно поднимать copywriting даже в статье про закупки). Тоже +4%,
+# фильтром НЕ режем — смежные темы должны оставаться досягаемыми.
+TOPIC_QUERY_MARKERS: Dict[str, List[str]] = {
+    "psychology": [
+        "психологи", "убежден", "влияни", "покупател", "поведен",
+        "когнитив", "склонност", "мотивац", "дефицит", "триггер",
+    ],
+    "copywriting": [
+        "заголовк", "копирайт", "редактур", "формулировк", "слог",
+        "абзац", "канцеляр", "стилист", "переговор",
+    ],
+    "marketing": [
+        "воронк", "лидо", "лидогенер", "трафик", "конверс", "оффер",
+        "рассылк", "автоворонк", "лендинг", "crm", "email",
+    ],
+    "seo": ["seo", "гео-оптимизац", "поисков", "schema", "eeat", "e-e-a"],
+}
+
+
+def infer_query_topics(query_text: str) -> List[str]:
+    """Грубое определение темы по маркерам запроса (см. TOPIC_QUERY_MARKERS)."""
+    q = (query_text or "").lower()
+    topics = []
+    for topic, markers in TOPIC_QUERY_MARKERS.items():
+        if any(m in q for m in markers):
+            topics.append(topic)
+    return topics
+
+
+def apply_topic_boost(chunks: List[Dict], query_text: str) -> List[Dict]:
+    """Чанки, чей topic совпал с темой запроса, получают +4% к скору.
+    Тихо пропускает чанки без topic (старые точки до бэкфилла)."""
+    topics = infer_query_topics(query_text)
+    if not topics:
+        return chunks
+    for ch in chunks:
+        if ch.get("topic") in topics:
+            ch["score"] = ch.get("score", 0.0) * 1.04
+    return chunks
+
 
 def query_knowledge(
     query_text: str,
@@ -242,6 +285,8 @@ def query_knowledge(
 
         # ДОМЕННЫЙ БУСТ ранжирования (см. apply_direction_boost)
         chunks = apply_direction_boost(chunks, direction)
+        # ТОПИК-БУСТ: маркеры запроса → topic (см. apply_topic_boost)
+        chunks = apply_topic_boost(chunks, query_text)
 
         logger.info(f"RAG [{agent_id}]: найдено {len(chunks)} чанков (query: {query_text[:50]}...)")
         return chunks
