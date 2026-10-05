@@ -666,7 +666,20 @@ class Pipeline:
 
         try:
             # 1. Brain — декомпозиция
+            # Аудит-2 / рекомендации фиксировщика (P0): обрезанный Brain = неполные
+            # разделы, исключения и источники не доезжают до Engineer/Heart.
+            # Одна повторная попытка с чистого листа; если снова обрыв — стоп.
             self._step_brain(state)
+            if getattr(state, "brain_incomplete", False):
+                logger.warning("   🔴 Brain INCOMPLETE: повторная попытка декомпозиции...")
+                self._step_brain(state)
+            if getattr(state, "brain_incomplete", False):
+                state.status = "error"
+                state.error = ("Brain не смог выдать полную декомпозицию без обрезания "
+                               "(finish_reason=length после повторной попытки). Статья не "
+                               "генерировалась на неполной основе.")
+                logger.error(f"❌ {state.error}")
+                return state
 
             # 2. Fact-Finder — факты из RAG
             self._step_fact_finder(state)
@@ -953,6 +966,8 @@ class Pipeline:
         if isinstance(pl, dict) and pl:
             state.persona_lock = pl
         logger.info(f"   📌 Persona Lock: {self._persona_summary(state.persona_lock)}")
+        # Аудит-2 / рекомендации (P0): флаг неполной декомпозиции для гейта запуска.
+        state.brain_incomplete = bool(getattr(state, "last_call_truncated", False))
         state.steps_completed.append("brain")
 
     def _step_fact_finder(self, state: PipelineState):
@@ -1235,6 +1250,18 @@ class Pipeline:
                             break
                 if corrected:
                     logger.info(f"   ✅ [factcheck] применено коррекций фактов: {corrected}")
+                    # Аудит-2 N3: claim pack собран ДО коррекций (в _step_fact_finder)
+                    # и содержит старые версии утверждений — Heart получал противоречивые
+                    # тексты из двух источников. Пересобираем на скорректированных
+                    # фактах (0 API-вызовов).
+                    try:
+                        from .claim_ledger import extract_claims as _ec, build_claim_pack as _bcp
+                        state.claims = _ec(state.facts, state.topic)
+                        state.claim_pack = _bcp(state.claims)
+                        logger.info(f"   📋 Claim Ledger пересобран после коррекций: "
+                                    f"{len(state.claims)} утверждений")
+                    except Exception as _re_err:
+                        logger.warning(f"   ⚠️ Пересборка Claim Ledger не удалась: {_re_err}")
             state.steps_completed.append("fact_verify")
         except Exception as e:
             logger.warning(f"⚠️ [factcheck] верификация пропущена из-за ошибки: {e}")

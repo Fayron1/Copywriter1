@@ -138,7 +138,10 @@ AGENTS: Dict[str, AgentConfig] = {
         label="🧠 Оркестратор",
         model=MODELS["deepseek_flash"],  # Flash: декомпозиция не требует Pro
         temperature=0.2,       # Строгая логика, минимум креатива
-        max_tokens=4000,
+        # Аудит-2 / рекомендации (P0): 4000 стабильно обрывалось
+        # (finish_reason=length в 3 статьях подряд) — декомпозиция уходила
+        # к Engineer неполной. 12000 с запасом на reasoning deepseek.
+        max_tokens=12000,
         description="Главный планировщик. Декомпозиция задач, маршрутизация, контроль качества.",
         input_from=["admin"],
         output_to=["fact_finder", "scout", "engineer"],
