@@ -1236,6 +1236,8 @@ def main():
         help="Направление: налоги / юридическое / бизнес / финансы / экономика",
     )
     parser.add_argument("--no-scout", action="store_true", help="Пропустить Scout (нет SearXNG)")
+    parser.add_argument("--no-send", action="store_true",
+                        help="Не отправлять статью в Telegram-бота после готовности")
     parser.add_argument("--images", action="store_true", help="Включить генерацию картинок (Artist)")
     parser.add_argument(
         "--output", "-o",
@@ -1417,6 +1419,25 @@ def main():
                 print(f"   {'─' * 30}")
                 for aid, d in tokens_by_agent.items():
                     print(f"   {aid:>15}: {d['prompt']+d['completion']:>8,} ({d['calls']} вызовов)")
+
+        # АВТООТПРАВКА в Telegram-бота (задача @an0ym, 2026-10-05): готовая
+        # статья уходит сразу. Внутри send_article_to_bot гейт автофикса —
+        # статья с красными замечаниями в бот не пройдёт. Сбой отправки
+        # не валит генерацию. Выключается --no-send.
+        if not args.no_send and os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("TELEGRAM_CHAT_ID"):
+            try:
+                import subprocess
+                send_script = Path(__file__).resolve().parent / "kb2" / "send_article_to_bot.py"
+                r = subprocess.run([sys.executable, str(send_script), str(output_dir)],
+                                   capture_output=True, text=True, timeout=300)
+                if r.returncode == 0:
+                    print("   📤 Статья отправлена в бота")
+                else:
+                    print(f"   ⚠️ Отправка в бота не прошла (код {r.returncode}):")
+                    for line in (r.stdout or "").strip().splitlines()[-3:]:
+                        print("      ", line)
+            except Exception as send_err:
+                print(f"   ⚠️ Отправка в бота не удалась: {send_err}")
     elif state.status == "budget_exhausted":
         print(f"💸 Баланс исчерпан. Частичный результат: {output_dir}")
         print(f"   Шаги завершены: {', '.join(state.steps_completed)}")

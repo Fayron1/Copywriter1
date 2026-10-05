@@ -28,7 +28,12 @@ def tg_call(method: str, **params) -> dict:
 
 
 def main(base: str):
-    art_dir = sorted(d for d in (Path(base)).iterdir() if d.is_dir())[-1]
+    base_p = Path(base)
+    if (base_p / "article.md").exists():
+        # В передан каталог конкретной статьи (автоотправка из generate.py)
+        art_dir = base_p
+    else:
+        art_dir = sorted(d for d in base_p.iterdir() if d.is_dir())[-1]
     chat = CHAT
     if not chat:
         raise SystemExit("TELEGRAM_CHAT_ID не задан")
