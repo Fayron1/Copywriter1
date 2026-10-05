@@ -4890,6 +4890,17 @@ class Pipeline:
         except Exception as e:
             logger.warning(f"Amendment-шлюз пропущен: {e}")
 
+        # TEMPLATE_LINT (план фиксировщика, P2): структурная сигнатура +
+        # n-gram повторы против последних статей (8 слов → warn, 15 → блок).
+        try:
+            from .template_lint import corpus_articles, check_template_repetition
+            _out = getattr(state, "output_dir", "") or ""
+            _exclude = Path(_out) / "article.md" if _out else None
+            _corpus = corpus_articles(limit=20, exclude=_exclude)
+            warnings.extend(check_template_repetition(text, _corpus))
+        except Exception as e:
+            logger.warning(f"Template-lint пропущен: {e}")
+
         # 1. Проверка длины
         target = state.custom_chars
         if not target:
