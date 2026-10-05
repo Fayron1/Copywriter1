@@ -116,6 +116,94 @@ def check_calc_trace(text: str, approved_block: str) -> List[str]:
     return issues
 
 
+_TOTAL_HEADER = re.compile(r"итого|всего|нагрузк", re.I)
+_PCT_CELL = re.compile(r"^\s*\d+(?:[.,]\d+)?\s*%\s*$")
+
+
+def _row_money(cell: str):
+    """Деньги из ячейки или None (проценты/текст пропускаются)."""
+    c = cell.strip()
+    if not c or _PCT_CELL.match(c):
+        return None
+    m = _MONEY_RE.search(c)
+    if not m:
+        return None
+    v = _parse_money(m.group(1), m.group(2))
+    return v if v > 0 else None
+
+
+def check_table_reconciliation(text: str) -> List[str]:
+    """TABLE_RECONCILIATION_GATE (ревью 37, BLOCKER без LLM): строка «Итого /
+    Всего нагрузка» обязана равняться сумме раскрытых компонентов строки.
+    Кейс статьи 37: 6 000 000 + 3 600 000 = 9 600 000, а «Итого» 13 579 208 —
+    читатель не может воспроизвести модель."""
+    issues: List[str] = []
+    for table, ctx in _extract_tables(text):
+        if not _TABLE_CONTEXT.search(table):
+            continue
+        rows = [l for l in table.splitlines() if l.lstrip().startswith("|")]
+        if len(rows) < 3:
+            continue
+        header = [c.strip() for c in rows[0].strip().strip("|").split("|")]
+        total_idx = next((i for i, h in enumerate(header)
+                          if _TOTAL_HEADER.search(h)), None)
+        if total_idx is not None:
+            for row in rows[2:]:
+                cells = [c.strip() for c in row.strip().strip("|").split("|")]
+                if len(cells) <= total_idx:
+                    continue
+                total = _row_money(cells[total_idx])
+                if total is None:
+                    continue
+                s = 0.0
+                for i, c in enumerate(cells):
+                    if i in (0, total_idx):
+                        continue
+                    v = _row_money(c)
+                    if v is not None:
+                        s += v
+                if s > 0 and abs(s - total) > total * 0.01:
+                    label = cells[0][:40] if cells else "?"
+                    issues.append(
+                        f"🔴 TABLE_RECONCILIATION_FAIL: «{label}…» — Итого {total:,.0f} ₽ "
+                        f"не равна сумме раскрытых компонентов {s:,.0f} ₽. Либо считайте "
+                        f"только налоги (НДС + УСН), либо включайте остальные элементы "
+                        f"(взносы, ФОТ) отдельной строкой с формулой и пояснением")
+                    break  # одна пометка на таблицу
+
+        # ТРАНСПОНИРОВАННЫЙ вид: итог — СТРОКА («Общая нагрузка»), компоненты —
+        # строки выше (кейс статьи 37: нагрузка по сценариям в колонках).
+        total_row_i = next((i for i, r in enumerate(rows[2:])
+                            if _TOTAL_HEADER.search(r)), None)
+        if total_idx is None and total_row_i is not None:
+            data_rows = rows[2:]
+            total_cells = [c.strip() for c in
+                           data_rows[total_row_i].strip().strip("|").split("|")]
+            for ci in range(1, len(total_cells)):
+                total = _row_money(total_cells[ci])
+                if total is None:
+                    continue
+                s = 0.0
+                for i2, r2 in enumerate(data_rows):
+                    if i2 == total_row_i:
+                        continue
+                    cells2 = [c.strip() for c in r2.strip().strip("|").split("|")]
+                    if len(cells2) <= ci:
+                        continue
+                    v = _row_money(cells2[ci])
+                    if v is not None:
+                        s += v
+                if s > 0 and abs(s - total) > total * 0.01:
+                    label = total_cells[0][:40] if total_cells else "?"
+                    issues.append(
+                        f"🔴 TABLE_RECONCILIATION_FAIL: колонка «{label}…» — итог "
+                        f"{total:,.0f} ₽ не равен сумме компонентов {s:,.0f} ₽. "
+                        f"Либо считайте только налоги (НДС + УСН), либо показывайте "
+                        f"остальные элементы отдельной строкой с формулой")
+                    break  # одна пометка на таблицу
+    return issues
+
+
 def check_calc_claims(text: str) -> List[str]:
     """Запрет оценочных расчётных выводов без раскрытых допущений."""
     issues: List[str] = []

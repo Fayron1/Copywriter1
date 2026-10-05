@@ -4873,9 +4873,11 @@ class Pipeline:
         _approved = getattr(state, "approved_calc_block", "")
         if _approved:
             try:
-                from .calc_gate import check_calc_trace, check_calc_claims
+                from .calc_gate import (check_calc_trace, check_calc_claims,
+                                        check_table_reconciliation)
                 warnings.extend(check_calc_trace(text, _approved))
                 warnings.extend(check_calc_claims(text))
+                warnings.extend(check_table_reconciliation(text))
             except Exception as e:
                 logger.warning(f"Калькуляторный гейт пропущен: {e}")
 

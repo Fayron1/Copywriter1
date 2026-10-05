@@ -2534,6 +2534,8 @@ def lint_legal(text: str) -> List[str]:
     issues.extend(lint_marketing_growth(text))
     # План фиксировщика (P1): состав доходов только с карточкой
     issues.extend(lint_income_composition(text))
+    # Ревью 37 (P1): дисциплина налоговых расчётов
+    issues.extend(lint_tax_table_discipline(text))
     return issues
 
 
@@ -2920,4 +2922,85 @@ def lint_income_composition(text):
                 f"НК РФ. Замена: «учитывайте доходы в порядке, установленном НК РФ; "
                 f"не исключайте проценты, займы, агентские поступления без отдельной "
                 f"проверки»")
+    return issues
+
+
+# ── Ревью статьи 37 (P1): дисциплина налоговых расчётов ──
+# PRICE_BASIS_REQUIRED: начисление НДС на сумму без статуса цены
+_PRICE_BASIS_TRIGGER = re.compile(
+    r"\d[\d\s]{4,}\s*[×x*]\s*(?:22|20|10|5|7)\s*%|"
+    r"\d+\s*%\s*(?:от|×|\*)\s*\d[\d\s]{3,}|"
+    r"НДС\s+составит\s+\d", re.I)
+_PRICE_BASIS_OK = re.compile(
+    r"без\s+НДС|с\s+НДС|сверх\s+цены|расч[её]тн\w+\s+ставк\w*|22\s*/\s*122|"
+    r"цена\s+включает|включая\s+НДС|цена\s+исключая|выручка\s+без\s+НДС|"
+    r"начислить\s+(?:НДС\s+)?сверх", re.I)
+
+# TAXPAYER_PROFILE_REQUIRED: «уменьшение на взносы / 50%» без профиля
+_TAXPAYER_PROFILE_TRIGGER = re.compile(
+    r"уменьш\w+[^.\n]{0,80}(?:50\s*%|половин\w+|страховые?\s+взнос\w*)|"
+    r"(?:ставк\w+|налог\w+)\s+УСН\s+(?:составля\w+|равн\w+)\s+\d", re.I)
+_TAXPAYER_PROFILE_OK = re.compile(
+    r"работник\w*|объект\w*\s+(?:УСН|налогообложени)|доходы\s+минус\s+расходы|"
+    r"ИП\s+без\s+работников|«доходы»|«доходы минус расходы»|зависит\s+в\s+том\s+"
+    r"числе\s+от\s+наличия\s+работников", re.I)
+
+# TAX_PROCEDURE_EXCEPTION_LINK: аванс + счёт-фактура без исключения
+_PROCEDURE_TRIGGER = re.compile(
+    r"аванс\w*[^.\n]{0,120}сч[её]т-фактур\w*|сч[её]т-фактур\w*[^.\n]{0,120}аванс\w*",
+    re.I)
+_PROCEDURE_OK = re.compile(
+    r"частич|остаток\w*|закрыт\w+\s+(?:отгрузк\w+|аванс\w*)|полностью|"
+    r"исключени\w+|не\s+всегда|если\s+аванс|отгрузк\w+\s+в\s+том\s+же|"
+    r"другой\s+порядок|проверьте\s+порядок", re.I)
+
+
+def lint_tax_table_discipline(text):
+    """Дисциплина расчётов (ревью 37): база цены, профиль плательщика,
+    полнота сценариев, исключения процедур."""
+    issues = []
+
+    # PRICE_BASIS_REQUIRED
+    for m in list(_PRICE_BASIS_TRIGGER.finditer(text))[:2]:
+        window = text[max(0, m.start() - 250):m.end() + 250]
+        if not _PRICE_BASIS_OK.search(window):
+            issues.append(
+                f"🔴 PRICE_BASIS_REQUIRED: расчёт НДС «{m.group(0)}» без статуса цены. "
+                f"Обязательно указать: 120 млн — цена без НДС (налог начисляется сверх) "
+                f"или цена с НДС (выделение по расчётной ставке 22/122). Это меняет "
+                f"финансовый результат радикально")
+            if len([i for i in issues if "PRICE_BASIS" in i]) >= 2:
+                break
+
+    # TAXPAYER_PROFILE_REQUIRED
+    for m in list(_TAXPAYER_PROFILE_TRIGGER.finditer(text))[:2]:
+        window = text[max(0, m.start() - 250):m.end() + 250]
+        if not _TAXPAYER_PROFILE_OK.search(window):
+            issues.append(
+                f"🟡 TAXPAYER_PROFILE_REQUIRED: «{m.group(0)}» — правило не универсально. "
+                f"Для организаций и ИП с работниками действует ограничение 50%, для ИП "
+                f"без работников правила иные. Укажите объект УСН, наличие работников и "
+                f"профиль плательщика или пометьте цифру как требующую отдельного расчёта")
+            break
+
+    # SCENARIO_COMPLETENESS_GATE: сравнение 5% vs 22% без 7%
+    if re.search(r"\b5\s*%", text) and re.search(r"\b22\s*%", text) \
+            and re.search(r"НДС", text, re.I) \
+            and not re.search(r"\b7\s*%|ставк\w+\s+7", text):
+        issues.append(
+            "🟡 SCENARIO_COMPLETENESS_GATE: статья сравнивает 5% и 22%, но не раскрывает "
+            "специальную ставку 7% — читатель с доходом выше диапазона 5% может решить, "
+            "что всегда останется на 5%. Добавьте: переход на 7% после превышения порога, "
+            "утрату права на УСН, особые правила первого года применения")
+
+    # TAX_PROCEDURE_EXCEPTION_LINK
+    for m in list(_PROCEDURE_TRIGGER.finditer(text))[:2]:
+        window = text[max(0, m.start() - 200):m.end() + 250]
+        if not _PROCEDURE_OK.search(window):
+            issues.append(
+                f"🟡 TAX_PROCEDURE_EXCEPTION_LINK: «{m.group(0)}» — упрощённый порядок "
+                f"изложен без исключения. Уточните: полное или частичное закрытие аванса "
+                f"отгрузкой в том же квартале; по остатку неотгруженного аванса действует "
+                f"другой порядок")
+            break
     return issues
