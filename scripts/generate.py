@@ -1290,7 +1290,7 @@ def main():
         "--provider", "-p",
         dest="provider",
         default="deepseek",
-        choices=["deepseek", "kie", "openai"],
+        choices=["deepseek", "kie", "openai", "claude"],
         help="Провайдер LLM для генерации текста (default: deepseek)",
     )
     parser.add_argument(
