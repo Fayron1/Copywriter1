@@ -5430,15 +5430,7 @@ class Pipeline:
                 state.tokens_by_agent[agent_id]["completion"] += _c
                 state.tokens_by_agent[agent_id]["calls"] += 1
             if parse_json:
-                cleaned = _claude_text.strip()
-                if cleaned.startswith("```"):
-                    cleaned = re.sub(r"^```(?:json)?\s*\n?", "", cleaned)
-                    cleaned = re.sub(r"\n?```\s*$", "", cleaned)
-                import json as _json
-                try:
-                    return _json.loads(cleaned)
-                except _json.JSONDecodeError:
-                    pass
+                return self._parse_json_response(_claude_text, agent_id)
             return _claude_text
 
         if override_provider:
