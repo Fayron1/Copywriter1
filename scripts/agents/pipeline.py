@@ -5404,6 +5404,43 @@ class Pipeline:
                                 f"{hm_provider}:{hm_model}")
 
         is_external_reviewer_kie = False
+
+        # ── CLAUDE PROVIDER: Claude Sonnet 5.5 + GPT-6 Sol fallback ──
+        # Обходит _chat_completion (другой API формат), вызывает claude_provider
+        # с ретраями (3 попытки Claude → 2 попытки GPT-6 Sol). Возвращает текст.
+        if override_provider == "claude" or getattr(state, "provider", "") == "claude":
+            from .claude_provider import call_claude_with_fallback
+            _max_tok = agent.max_tokens
+            logger.info(f"   🎭 [{agent.name}] Claude Sonnet 5.5 (fallback: gpt-6-sol), max_tokens={_max_tok}")
+            _claude_text = call_claude_with_fallback(
+                extended_system_prompt, user_message, max_tokens=_max_tok)
+            if _claude_text is None:
+                raise RuntimeError(
+                    f"Claude и GPT-6 Sol недоступны после всех ретраев для {agent.name}")
+            # Подсчёт токенов (приблизительный: 1 токен ≈ 4 символа для русской речи)
+            if state is not None:
+                _p = len(extended_system_prompt + user_message) // 4
+                _c = len(_claude_text) // 4
+                state.total_prompt_tokens += _p
+                state.total_completion_tokens += _c
+                state.total_tokens += _p + _c
+                if agent_id not in state.tokens_by_agent:
+                    state.tokens_by_agent[agent_id] = {"prompt": 0, "completion": 0, "calls": 0}
+                state.tokens_by_agent[agent_id]["prompt"] += _p
+                state.tokens_by_agent[agent_id]["completion"] += _c
+                state.tokens_by_agent[agent_id]["calls"] += 1
+            if parse_json:
+                cleaned = _claude_text.strip()
+                if cleaned.startswith("```"):
+                    cleaned = re.sub(r"^```(?:json)?\s*\n?", "", cleaned)
+                    cleaned = re.sub(r"\n?```\s*$", "", cleaned)
+                import json as _json
+                try:
+                    return _json.loads(cleaned)
+                except _json.JSONDecodeError:
+                    pass
+            return _claude_text
+
         if override_provider:
             provider = override_provider.lower()
             model_name = override_model if override_model else model_name
