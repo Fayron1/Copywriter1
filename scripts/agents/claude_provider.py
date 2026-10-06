@@ -30,10 +30,10 @@ _GPT6SOL_MODEL = "gpt-6-sol"
 _KIE_HOST = os.getenv("KIE_API_HOST", "https://api.kie.ai").rstrip("/")
 _KIE_KEY = os.getenv("KIE_API_KEY", "")
 
-_MAX_RETRIES = 3          # попыток Claude на один вызов
-_RETRY_DELAYS = [2, 5, 10]  # сек между ретраями
-_FALLBACK_RETRIES = 2     # попыток gpt-6-sol после фейла Claude
-_TIMEOUT = 180
+_MAX_RETRIES = 5          # попыток Claude на один вызов (KIE нестабилен)
+_RETRY_DELAYS = [2, 5, 10, 15, 20]
+_FALLBACK_RETRIES = 3     # попыток gpt-6-sol после фейла Claude
+_TIMEOUT = 300            # Engineer может думать долго
 
 
 def _extract_claude_text(data: dict) -> str:
@@ -61,19 +61,20 @@ def call_claude_with_fallback(system: str, user: str,
 
     Возвращает текст или None при полном фейле обоих провайдеров.
     """
-    # Phase 1: Claude Sonnet 5.5 (3 попытки)
+    # Phase 1: Claude Sonnet 5.5 (5 попыток с диагностикой)
     result = _try_claude(system, user, max_tokens)
     if result is not None:
         return result
 
-    # Phase 2: GPT-6 Sol fallback (2 попытки)
-    logger.warning("  🔄 Claude недоступен после %d попыток — fallback на gpt-6-sol",
-                   _MAX_RETRIES)
+    # Phase 2: GPT-6 Sol fallback (3 попытки)
+    logger.warning("  🔄 Claude недоступен после %d попыток — fallback на gpt-6-sol (input: sys=%d, user=%d зн.)",
+                   _MAX_RETRIES, len(system), len(user))
     result = _try_gpt6sol(system, user, max_tokens)
     if result is not None:
         return result
 
-    logger.error("  ❌ Оба провайдера недоступны (claude + gpt-6-sol)")
+    logger.error("  ❌ Оба провайдера недоступны (claude + gpt-6-sol); input: sys=%d, user=%d зн.",
+                 len(system), len(user))
     return None
 
 
@@ -94,10 +95,16 @@ def _try_claude(system: str, user: str, max_tokens: int) -> Optional[str]:
         "max_tokens": max_tokens,
         "stream": False,
     }
+    logger.info(f"  📤 Claude запрос: sys={len(system):,} user={len(user):,} max_tokens={max_tokens}")
 
     for attempt in range(_MAX_RETRIES):
         try:
+            t0 = time.time()
             r = requests.post(url, json=body, headers=headers, timeout=_TIMEOUT)
+            elapsed = time.time() - t0
+            logger.info(f"  📥 Claude попытка {attempt+1}: статус={r.status_code}, "
+                        f"len={len(r.text):,}, время={elapsed:.1f}s")
+
             if r.status_code in (429, 502, 503):
                 delay = _RETRY_DELAYS[min(attempt, len(_RETRY_DELAYS) - 1)]
                 logger.warning(f"  ⏳ Claude {r.status_code}; повтор {attempt + 1}/{_MAX_RETRIES} через {delay}s")
@@ -105,13 +112,17 @@ def _try_claude(system: str, user: str, max_tokens: int) -> Optional[str]:
                 continue
             r.raise_for_status()
             data = r.json()
+            # Логируем stop_reason для диагностики обрывов
+            stop = data.get("stop_reason", "?")
             text = _extract_claude_text(data)
+            logger.info(f"  📥 Claude: stop_reason={stop}, text_len={len(text)}")
             if text:
                 return text
-            logger.warning(f"  ⚠️ Claude вернул пустой content (попытка {attempt + 1})")
+            logger.warning(f"  ⚠️ Claude вернул пустой content (попытка {attempt + 1}, "
+                           f"stop_reason={stop})")
             time.sleep(_RETRY_DELAYS[min(attempt, len(_RETRY_DELAYS) - 1)])
         except requests.exceptions.Timeout:
-            logger.warning(f"  ⏳ Claude таймаут (попытка {attempt + 1}/{_MAX_RETRIES})")
+            logger.warning(f"  ⏳ Claude таймаут {_TIMEOUT}s (попытка {attempt + 1}/{_MAX_RETRIES})")
             time.sleep(_RETRY_DELAYS[min(attempt, len(_RETRY_DELAYS) - 1)])
         except requests.exceptions.RequestException as e:
             logger.warning(f"  ⚠️ Claude ошибка (попытка {attempt + 1}): {e}")
