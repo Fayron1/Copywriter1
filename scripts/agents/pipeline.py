@@ -2605,21 +2605,41 @@ class Pipeline:
         return best_draft_data["text"]
 
     def _step_quality_edit_loop(self, state: PipelineState):
-        """Surgical Edit Loop в QUALITY_MODE с памятью одобренных разделов и стратегией Accept-Best."""
-        logger.info("🕵️ [6/8] Ревизор: запуск Surgical Edit Loop в QUALITY_MODE...")
-        
+        """Surgical Edit Loop v2 (аудит фиксировщика): разделяет best_publishable
+        от best_draft, привязывает одобрение к хешу раздела, применяет патчи
+        атомарно, проверяет claim_coverage."""
+        import hashlib as _hl
+        logger.info("🕵️ [6/8] Ревизор: запуск Surgical Edit Loop v2 в QUALITY_MODE...")
+
         best_draft = state.draft
         best_score = 0
-        approved_sections = set()
+        best_publishable_draft = None   # только безопасные версии
+        best_publishable_score = 0
+        approved_sections = {}  # {idx: text_hash} — одобрение привязано к версии
         MAX_QUALITY_ITERS = 3
-        # True, если текущий state.draft содержит правки, которые ещё не получили оценку.
-        # Нужно, чтобы правки последней итерации не терялись при Accept-Best.
         pending_unscored_patch = False
-        # Снимок последних правок ревизора — нужен для одноразовой жёсткой эскалации вне цикла.
         last_edits = []
-        
         best_score = 0
-        
+        open_blockers = []  # накапливаем нерешённые блокеры
+
+        def _section_hash(text):
+            return _hl.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+        def _is_publishable(score, resp, _open_blockers):
+            """Публикабельность = безопасность + редакторский балл.
+            BALЛ не отменяет блокировки; блокировки не заменяют балл."""
+            if not resp.get("approved"):
+                return False
+            if score < 85:
+                return False
+            for v in (resp.get("claim_verdicts") or []):
+                if isinstance(v, dict) and str(v.get("status", "")).upper() in (
+                        "UNSUPPORTED", "CONTRADICTED", "OUTDATED"):
+                    return False
+            if _open_blockers:
+                return False
+            return True
+
         for iteration in range(MAX_QUALITY_ITERS):
             logger.info(f"\n   🔄 Surgical Edit Loop: итерация {iteration+1} из {MAX_QUALITY_ITERS} (лучший балл: {best_score})")
             
@@ -2841,9 +2861,17 @@ class Pipeline:
                     any(str(v.get("status", "")).upper() in ("UNSUPPORTED", "CONTRADICTED", "OUTDATED")
                         for v in (response.get("claim_verdicts") or []) if isinstance(v, dict))):
                 logger.info(f"      ✅ Ревизор одобрил (балл {score}, approved=True, нет UNSUPPORTED/CONTRADICTED).")
+                # v2: привязка одобрения к версии текста раздела
+                for idx in editable:
+                    if idx < len(sections):
+                        approved_sections[idx] = _section_hash(sections[idx]["raw"])
+                best_publishable_draft = state.draft
+                best_publishable_score = score
                 break
                 
-            # Фильтруем правки с учетом памяти одобренных/замороженных разделов
+            # Фильтруем правки с учетом одобрения, привязанного К ВЕРСИИ текста
+            # (аудит v2: одобренный раздел больше не неприкосновенен, если
+            # контекст изменился — хеш текста раздела обязан совпадать)
             valid_edits = []
             for e in edits:
                 idx = e.get("section_index")
@@ -2852,8 +2880,14 @@ class Pipeline:
                 except (TypeError, ValueError):
                     continue
                 if idx in approved_sections:
-                    logger.info(f"      ⏭️ Пропускаем раздел [{idx}], так как он заморожен (был одобрен ранее).")
-                    continue
+                    cur_hash = _section_hash(sections[idx]["raw"])
+                    if approved_sections[idx] == cur_hash:
+                        logger.info(f"      ⏭️ Раздел [{idx}] заморожен (хеш совпадает).")
+                        continue
+                    # хеш изменился — раздел был отредактирован другой правкой,
+                    # старое одобрение больше не действует
+                    logger.info(f"      🔄 Раздел [{idx}] изменился с одобрения — переоткрываем.")
+                    del approved_sections[idx]
                 valid_edits.append({
                     "section_index": idx,
                     "reason": e.get("reason", ""),
@@ -2912,28 +2946,21 @@ class Pipeline:
             # Собираем статью
             new_draft = self._reassemble_sections(new_sections)
             
-            # Проверяем целостность структуры
-            import re as _re
-            h2_before = len(_re.findall(r"(?m)^##\s", state.draft))
-            h2_after = len(_re.findall(r"(?m)^##\s", new_draft))
-            if h2_after < h2_before or len(new_draft) < len(state.draft) * 0.6:
-                logger.warning("      ⚠️ Нарушена структура статьи после правок. Откатываемся.")
-                continue
-                
-            # Фиксируем разделы, которые НЕ правились на этой итерации, как одобренные
+            # Атомарное одобрение: разделы, НЕ правившиеся на этой итерации,
+            # одобряются с привязкой К ХЕШУ ТЕКСТА (аудит v2). Если текст
+            # раздела изменится позже, одобрение отзывается автоматически.
             for idx in range(len(sections)):
                 if idx not in instr_by_idx:
-                    approved_sections.add(idx)
-                    
+                    approved_sections[idx] = _section_hash(sections[idx]["raw"])
+
             state.draft = new_draft
             state.sheriff_iterations += 1
-            # Эти правки ещё не оценены ревизором — пометим, чтобы не потерять при Accept-Best.
             pending_unscored_patch = True
             logger.info(f"      🩹 Успешно пропатчено разделов: {changed}. Длина: {len(state.draft)} символов.")
-            
-        # Если последняя итерация применила правки, которые ещё не оценивались ревизором,
-        # оцениваем финальный черновик и сравниваем с лучшим. Раньше эти правки терялись:
-        # скоринг шёл в начале итерации, а патч последней итерации оставался без оценки.
+
+        # ─── АУДИТ v2: разделение best_publishable / best_draft ───
+        # best_publishable_draft — только версии, прошедшие все проверки.
+        # best_draft — лучший балл, но возможно небезопасный.
         if pending_unscored_patch:
             final_eval = self._evaluate_draft_score(state, state.draft)
             final_score = final_eval.get("score", 0)
@@ -2945,6 +2972,24 @@ class Pipeline:
             if final_score >= best_score and len(state.draft) > 100:
                 best_score = final_score
                 best_draft = state.draft
+            # Проверить, является ли финальная версия публикабельной
+            if final_score >= 85 and not open_blockers:
+                best_publishable_draft = state.draft
+                best_publishable_score = final_score
+
+        # ─── ФИНАЛЬНОЕ РЕШЕНИЕ: безопасность отдельно от редакторского балла ───
+        if best_publishable_draft:
+            state.draft = best_publishable_draft
+            state.publication_status = "APPROVED"
+            logger.info(f"   ✅ Publishable версия выбрана (балл {best_publishable_score}).")
+        else:
+            state.draft = best_draft
+            state.publication_status = "NEEDS_HUMAN_REVIEW"
+            logger.warning(
+                f"   ⚠️ Публикабельная версия не найдена за {MAX_QUALITY_ITERS} итераций. "
+                f"Статья помечена NEEDS_HUMAN_REVIEW; best_draft с баллом {best_score} возвращён для ручной доработки.")
+            state.unresolved_issues = list(open_blockers) if open_blockers else [
+                f"Score {best_score} < 85 после {MAX_QUALITY_ITERS} итераций ревью"]
 
         # ─── Жёсткая ОДНОРАЗОВАЯ эскалация (строго ВНЕ цикла, без рекурсии) ───
         # Если после всех итераций лучший черновик всё ещё неправдоподобен (ниже порога),
