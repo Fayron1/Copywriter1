@@ -78,7 +78,10 @@ MODELS: Dict[str, str] = {
     # шлюз (api.kie.ai/gemini-3-8-flash-openai/v1 — _get_kie_client строит URL
     # из имени). Модель НЕСТАБИЛЬНАЯ: ~50% запросов отдают internal error,
     # pipeline ретраит; retry_on_fail поднят до 4.
-    "external_reviewer": os.getenv("MODEL_EXTERNAL_REVIEWER", "gemini-3-8-flash-openai"),
+    # GPT-6.1 Sol через KIE codex/v1/responses — единственная модель,
+    # которая стабильно выполняет adversarial-ревью (gemini-3.8-flash
+    # неспособен: 5 статей подряд 0 рисков при баллах 38-86)
+    "external_reviewer": os.getenv("MODEL_EXTERNAL_REVIEWER", "gpt-6-1-sol"),
     # OpenAI — fallback при provider="openai"
     "openai_text":    os.getenv("MODEL_OPENAI_TEXT",    "gpt-4o"),
     # KIE — fallback при provider="kie"

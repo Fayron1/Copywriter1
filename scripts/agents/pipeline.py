@@ -2345,6 +2345,62 @@ class Pipeline:
         
         return {"score": 50, "critique": "Fallback score"}
 
+    def _call_codex_reviewer(self, system_prompt: str, user_msg: str,
+                             parse_json: bool = True) -> dict:
+        """GPT-6.1 Sol через KIE codex/v1/responses API.
+
+        Формат отличается от chat/completions: input вместо messages,
+        output array вместо choices, reasoning конфигурация.
+        Возвращает распарсенный JSON или пустой dict при ошибке.
+        """
+        import os as _os
+        import requests as _requests
+        import json as _json
+
+        api_key = _os.getenv("KIE_API_KEY", "")
+        host = _os.getenv("KIE_API_HOST", "https://api.kie.ai").rstrip("/")
+        model = _os.getenv("MODEL_EXTERNAL_REVIEWER", "gpt-6-1-sol")
+        url = f"{host}/codex/v1/responses"
+
+        body = {
+            "model": model,
+            "input": [
+                {"role": "system",
+                 "content": [{"type": "input_text", "text": system_prompt}]},
+                {"role": "user",
+                 "content": [{"type": "input_text", "text": user_msg}]},
+            ],
+            "reasoning": {"effort": "high"},
+            "stream": False,
+        }
+        headers = {"Authorization": f"Bearer {api_key}",
+                   "Content-Type": "application/json"}
+
+        for attempt in range(2):
+            try:
+                r = _requests.post(url, json=body, headers=headers, timeout=180)
+                r.raise_for_status()
+                data = r.json()
+                # ответ: output[] с элементами разных типов
+                for item in data.get("output", []):
+                    if item.get("type") == "message":
+                        for c in item.get("content", []):
+                            if c.get("type") == "output_text":
+                                text = c.get("text", "").strip()
+                                # убрать ```json ограждение
+                                if text.startswith("```"):
+                                    text = re.sub(r"^```(?:json)?\s*\n?", "", text)
+                                    text = re.sub(r"\n?```\s*$", "", text)
+                                return _json.loads(text)
+                return {}
+            except Exception as e:
+                if attempt == 0:
+                    import time
+                    time.sleep(5)
+                else:
+                    logger.error(f"codex_reviewer ошибка после ретрая: {e}")
+        return {}
+
     def _step_heart_best_of(self, state: PipelineState, style_block: str, rag_block: str, heart_target: int) -> str:
         """Генерация 3 черновиков на разных моделях/температурах и выбор лучшего ревизором."""
         logger.info("   🏆 [QUALITY_MODE] Запускаем генерацию Best-of-3 разнородных черновиков...")
@@ -2659,7 +2715,12 @@ class Pipeline:
             )
             
             try:
-                response = self._call_agent("external_reviewer", user_msg, parse_json=True, state=state)
+                # GPT-6.1 Sol использует codex/responses API вместо chat/completions
+                if "gpt-6-1-sol" in MODELS.get("external_reviewer", ""):
+                    _sys_p = system_prompt
+                    response = self._call_codex_reviewer(_sys_p, user_msg, parse_json=True)
+                else:
+                    response = self._call_agent("external_reviewer", user_msg, parse_json=True, state=state)
             except Exception as e:
                 logger.warning(f"      ⚠️ Ревизор недоступен на итерации {iteration+1} ({e}). Прерываем цикл правок.")
                 break
