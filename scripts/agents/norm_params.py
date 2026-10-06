@@ -3149,12 +3149,15 @@ def lint_fix_closure(text):
     во всех местах текста (абзацы, таблицы, чек-листы, выводы)."""
     issues = []
     # гарантийная таблица без разделения пеня/штраф: «Штраф, не пеня» —
-    # негация пени внутри плохой ячейки тоже признак
+    # негация пени внутри плохой ячейки тоже признак. Квалифицированные
+    # строки («штраф при применимом основании», со ссылкой на Правила)
+    # корректны и не флагуются
     for m in list(_GUARANTEE_ROW.finditer(text))[:3]:
         row = m.group(0)
         negation = bool(re.search(r"не\s+пени|не\s+пеня", row, re.I))
         has_penalty = bool(re.search(r"пени|пеня", row, re.I))
-        if re.search(r"штраф", row, re.I) and (negation or not has_penalty):
+        qualified = bool(re.search(r"при\s+применимом\s+основании|Правил\w*\s*№?\s*1042|п\.\s*[39]\s*Правил", row, re.I))
+        if re.search(r"штраф", row, re.I) and not qualified and (negation or not has_penalty):
             issues.append(
                 f"🔴 GUARANTEE_TABLE_CONTRADICTION: строка таблицы «{row[:80]}…» называет "
                 f"гарантийные нарушения основанием штрафа без разделения. Ч. 7-8 ст. 34: "
