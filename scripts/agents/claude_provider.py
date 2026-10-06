@@ -80,8 +80,10 @@ def call_claude_with_fallback(system: str, user: str,
 def _try_claude(system: str, user: str, max_tokens: int) -> Optional[str]:
     """Claude Sonnet 5.5 через KIE /claude/v1/messages."""
     url = f"{_KIE_HOST}/claude/v1/messages"
+    # KIE требует Authorization: Bearer, НЕ X-Api-Key (кейс статьи 40:
+    # X-Api-Key возвращал 401 при 200 статусе)
     headers = {
-        "X-Api-Key": _KIE_KEY,
+        "Authorization": f"Bearer {_KIE_KEY}",
         "anthropic-version": "2023-06-01",
         "Content-Type": "application/json",
     }
