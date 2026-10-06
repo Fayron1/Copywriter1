@@ -3188,6 +3188,10 @@ def lint_fix_closure(text):
     # списание без раскрытия условий ПП № 783
     for m in list(_RELIEF_TRIGGER.finditer(text))[:2]:
         window = text[max(0, m.start() - 200):m.end() + 400]
+        # вхождение внутри оглавления («Содержание ... Снижение и списание
+        # неустойки: ...») — не утверждение тела (кейс html-версии статьи 38)
+        if re.search(r"Содержание", window, re.I):
+            continue
         if not _RELIEF_OK.search(window):
             issues.append(
                 f"🟡 RELIEF_ROUTE_UNDISCLOSED: списание заявлено, но условия ПП № 783 не "
