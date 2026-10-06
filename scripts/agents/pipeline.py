@@ -730,6 +730,38 @@ class Pipeline:
                 # Финальная валидация (без API)
                 validation_warnings = self._validate_final(state)
 
+                # FINAL INTEGRITY GATE (аудит v2): после Booster/Packager —
+                # весь артефакт, не только изменённое. Booster может добавить
+                # цифру или обещание, Packager — убрать условие из абзаца.
+                # Независимое извлечение утверждений из финального текста
+                # + сопоставление с Claim Ledger → непокрытые высокорисковые.
+                try:
+                    _final_text = state.final_article or state.draft or ""
+                    _claim_ids = {str(c.get("claim_id", ""))
+                                  for c in (getattr(state, "claims", None) or [])}
+                    _verified_keys = {k for k, v in
+                                      (getattr(state, "verified_facts", {}) or {}).items()
+                                      if isinstance(v, dict) and not v.get("needs_hedging")}
+                    from .draft_claim_extractor import extract_claims_deterministic
+                    _final_claims = extract_claims_deterministic(_final_text)
+                    _uncovered = [c for c in _final_claims
+                                  if str(c.get("text", "")) not in
+                                  {str(fc.get("text", "")) for fc in
+                                   (getattr(state, "claims", None) or [])}
+                                  and c.get("risk") == "high"]
+                    if _uncovered:
+                        logger.warning(
+                            f"   🔴 Final Integrity Gate: {len(_uncovered)} высокорисковых "
+                            f"утверждений не покрыты Claim Ledger — в publish-gate")
+                        validation_warnings.extend(
+                            f"🔴 FINAL_INTEGRITY: непокрытое высокорисковое утверждение: "
+                            f"{c.get('text', '')[:100]}" for c in _uncovered[:5])
+                    else:
+                        logger.info("   ✅ Final Integrity Gate: все высокорисковые "
+                                    "утверждения покрыты Claim Ledger")
+                except Exception as _fig_err:
+                    logger.warning(f"   ⚠️ Final Integrity Gate пропущен: {_fig_err}")
+
                 # ПРИНУДИТЕЛЬНАЯ ПЕТЛЯ параметров: модель дрейфует к приорам на длинных
                 # генерациях («20%» вместо «22%» при таблице перед глазами — кейс 2026-09-27).
                 # 1) Детерминированная замена устаревших чисел на действующие.
@@ -2800,11 +2832,14 @@ class Pipeline:
             # Текущий черновик только что получил свежую оценку — он больше не "неоценённый".
             pending_unscored_patch = False
                 
-            # ФИКС (статья 35): «not edits» при низком балле открывал гейт —
-            # Ревизор вернул approved=True + score=58 без правок, и черновик
-            # был принят. Одобрение только через порог балла.
-            if (response.get("approved") == True and score >= 85) or score >= 90:
-                logger.info(f"      ✅ Ревизор одобрил статью (балл {score}, approved={response.get('approved')}).")
+            # ФИКС (статья 35 + аудит v2): score>=90 больше НЕ обходит
+            # содержательный запрет. Аудит: «Версия A: 88 баллов, но
+            # ошибочная рекомендация» — балл не отменяет блокировку.
+            # approved=true + score>=85 = единственный путь выхода.
+            if (response.get("approved") == True and score >= 85) and not (
+                    any(str(v.get("status", "")).upper() in ("UNSUPPORTED", "CONTRADICTED", "OUTDATED")
+                        for v in (response.get("claim_verdicts") or []) if isinstance(v, dict))):
+                logger.info(f"      ✅ Ревизор одобрил (балл {score}, approved=True, нет UNSUPPORTED/CONTRADICTED).")
                 break
                 
             # Фильтруем правки с учетом памяти одобренных/замороженных разделов
