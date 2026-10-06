@@ -2747,8 +2747,9 @@ class Pipeline:
             )
             
             try:
-                # GPT-6.1 Sol использует codex/responses API вместо chat/completions
-                if "gpt-6-1-sol" in MODELS.get("external_reviewer", ""):
+                # GPT-6.1 Sol использует codex/responses API; остальные модели —
+                # стандартный путь через _call_agent
+                if MODELS.get("external_reviewer", "").startswith("gpt-6-1-sol"):
                     _sys_p = system_prompt
                     response = self._call_codex_reviewer(_sys_p, user_msg, parse_json=True)
                 else:
