@@ -2599,6 +2599,9 @@ class Pipeline:
                 "  \"top_5_risky_claims\": [  // ОБЯЗАТЕЛЬНО: топ самых рискованных утверждений статьи\n"
                 "    {\"claim_id\": \"L-001\", \"quote\": \"дословная цитата из статьи\", \"risk_reason\": \"почему рискованно\", \"required_proof\": \"что нужно для безопасной публикации\", \"publication_action\": \"ALLOW | REWRITE | REMOVE | BLOCK\"}\n"
                 "  ],\n"
+                "  \"claim_verdicts\": [  // ОБЯЗАТЕЛЬНО при наличии КАТАЛОГА УТВЕРЖДЕНИЙ: вердикт по КАЖДОМУ claim_id из каталога, без пропусков\n"
+                "    {\"claim_id\": \"cl_000\", \"status\": \"VERIFIED | VERIFIED_WITH_LIMITS | UNSUPPORTED | CONTRADICTED | OUTDATED | NEEDS_HUMAN_REVIEW\", \"publication_action\": \"ALLOW | REWRITE | REMOVE | BLOCK\"}\n"
+                "  ],\n"
                 "  \"edits\": [\n"
                 "    {\"section_index\": <индекс раздела>, \"reason\": \"почему нужна правка\", \"instruction\": \"что конкретно сделать в этом разделе\"}\n"
                 "  ]\n"
@@ -2606,16 +2609,43 @@ class Pipeline:
                 "ПРАВИЛА КОНТРАКТА (лень технически невозможна):\n"
                 "- top_5_risky_claims пуст ДОПУСТИМ только при approved=true и score>=85;\n"
                 "- нашёл рискованное утверждение без источника/условий/субъекта — оно ОБЯЗАНО попасть в top_5_risky_claims с publication_action != ALLOW;\n"
-                "- publication_action REWRITE/REMOVE/BLOCK без соответствующей записи в edits запрещён.\n"
+                "- publication_action REWRITE/REMOVE/BLOCK без соответствующей записи в edits запрещён;\n"
+                "- в КАТАЛОГЕ УТВЕРЖДЕНИЙ есть N утверждений → claim_verdicts обязан содержать N вердиктов; пропущенные автоматически получают NEEDS_HUMAN_REVIEW + REWRITE.\n"
             )
             
+            # CLAIM-ПРЕТЕКСТ (план фиксировщика): судья получает уже извлечённые
+            # карточки утверждений и ОБЯЗАН выдать вердикт по каждой — пустой
+            # список рисков при заполненном каталоге отсеивается валидацией.
+            claim_catalog = ""
+            _ledger = getattr(state, "claims", None) or []
+            if _ledger:
+                _vfacts = getattr(state, "verified_facts", {}) or {}
+                cat_lines = []
+                for c in _ledger[:20]:
+                    vf = _vfacts.get(_factcheck._normalize_claim(str(c.get("text", ""))))
+                    vf_status = (vf or {}).get("publication_status", "")
+                    risk = "HIGH" if (vf or {}).get("needs_hedging") else str(c.get("risk", "medium"))
+                    cat_lines.append(
+                        f"- {c.get('claim_id', '?')} [{c.get('claim_type', '?')}, риск: {risk}]"
+                        f"{(' статус верификатора: ' + vf_status) if vf_status else ''}: "
+                        f"«{str(c.get('text', ''))[:140]}»")
+                if cat_lines:
+                    claim_catalog = (
+                        "\n\nКАТАЛОГ УТВЕРЖДЕНИЙ (извлечён детерминированно):\n"
+                        + "\n".join(cat_lines)
+                        + "\n\nВердиКТ ПО КАЖДОМУ утверждению из каталога ОБЯЗАТЕЛЕН: "
+                          "заполни claim_verdicts для всех перечисленных id. Утверждение "
+                          "без источника, условий применимости или с пометкой верификатора "
+                          "BLOCKER/HIGH не может получить ALLOW без правки.")
+
             user_msg = (
                 f"ТЕМА СТАТЬИ: {state.topic}\n"
                 f"ТЗ/ОПИСАНИЕ: {state.description or 'нет'}\n\n"
                 f"{self._persona_block(state)}"
                 f"РАЗДЕЛЫ СТАТЬИ:\n{catalog}\n\n"
+                f"{claim_catalog}\n\n"
                 f"ПОЛНЫЙ ТЕКСТ СТАТЬИ:\n{state.draft}\n\n"
-                f"Верни JSON с оценкой и списком правок."
+                f"Верни JSON с оценкой, вердиктами по каталогу и списком правок."
             )
             
             try:
@@ -2663,6 +2693,33 @@ class Pipeline:
                         logger.info("      🛡️ approved противоречит рискам — отменён")
                 logger.info(f"      🛡️ Рискованных утверждений: {len(blocking)}, "
                             f"сконвертировано в правки: {len(mapped)}")
+
+            # CLAIM-ПРЕТЕКСТ валидация (план фиксировщика): каждый claim_id из
+            # каталога обязан иметь вердикт. Пропущенные автоматически получают
+            # NEEDS_HUMAN_REVIEW + REWRITE — молчать не выйдет.
+            if claim_catalog and _ledger:
+                verdicts = {str(v.get("claim_id")): v for v in
+                            (response.get("claim_verdicts") or []) if isinstance(v, dict)}
+                missing = [c for c in _ledger
+                           if str(c.get("claim_id", "")) not in verdicts]
+                auto = []
+                for c in missing[:10]:
+                    vkey = _factcheck._normalize_claim(str(c.get("text", "")))
+                    vinfo = (getattr(state, "verified_facts", {}) or {}).get(vkey) or {}
+                    status = ("CONTRADICTED" if (vinfo or {}).get("verdict") == "conflict"
+                              else "NEEDS_HUMAN_REVIEW")
+                    auto.append({"claim_id": c.get("claim_id"),
+                                 "status": status, "publication_action": "REWRITE"})
+                if auto:
+                    logger.info(f"      🛡️ Валидация вердиктов: {len(auto)} пропущено -> "
+                                f"NEEDS_HUMAN_REVIEW + REWRITE")
+                    response["approved"] = False
+                # утверждения с UNSUPPORTED/CONTRADICTED без правок -> правки
+                bad_claims = [v for v in (response.get("claim_verdicts") or [])
+                              if isinstance(v, dict) and str(v.get("status", "")).upper()
+                              in ("UNSUPPORTED", "CONTRADICTED")]
+                if bad_claims:
+                    response["approved"] = False
 
             logger.info(f"      📈 Текущий балл: {score}/100. Найдено правок: {len(edits)}")
             
