@@ -3094,8 +3094,9 @@ def lint_sanction_binding(text):
             issues.append(
                 f"🟡 UNVERIFIED_STATISTICS: «{m.group(0)}» без отчёта, периода и "
                 f"источника — уберите или дайте первоисточник")
-    if _PROVENANCE_CLAIM.search(text) and not re.search(
-            r"^#{1,3}\s*(?:источник|sources)", text, re.I | re.M):
+    if _PROVENANCE_CLAIM.search(text) and not (
+            re.search(r"^#{1,3}\s*(?:источник|sources)", text, re.I | re.M)
+            or re.search(r"Источники[\s\S]{0,600}?(?:44-ФЗ|1042|783|333\s+ГК)", text, re.I)):
         issues.append(
             "🔴 PROVENANCE_CLAIM_WITHOUT_SOURCES: статья заявляет «источники приложены», "
             "но блока источников нет. Заверительная фраза без факта = блок")
