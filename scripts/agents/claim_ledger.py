@@ -125,6 +125,7 @@ def extract_claims(facts: Dict[str, Any], topic: str = "") -> List[Dict[str, Any
             "does_not_apply_when": fact.get("does_not_apply_when", ""),
             "exceptions": fact.get("exceptions", ""),
             "numeric_scope": fact.get("numeric_scope", ""),
+            "source_fragment_type": fact.get("source_fragment_type", ""),
             "publication_status": "",
         }
 

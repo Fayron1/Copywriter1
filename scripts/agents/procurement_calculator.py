@@ -11,7 +11,7 @@ Heart получает готовый объект с трассировкой �
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List
 
 logger = logging.getLogger("agents.procurement_calc")
@@ -192,6 +192,10 @@ class PenaltyInput:
     delay_days: int = 30            # дни просрочки
     key_rate: float = 9.5           # ключевая ставка ЦБ на дату уплаты, %
     is_sme: bool = False            # контракт с МСП по п. 1 ч. 1 ст. 30
+    # DYNAMIC_PENALTY_BASE (план фиксировщика): список интервалов частичного
+    # исполнения [(начало_дня, дней_интервала, исполнено_на_начало, ставка_%)].
+    # Пустой список = единая база на весь период (старое поведение).
+    intervals: list = field(default_factory=list)
 
 
 def calc_penalties(inp: PenaltyInput) -> Dict:
@@ -205,13 +209,36 @@ def calc_penalties(inp: PenaltyInput) -> Dict:
     # ── Пени поставщика (ч. 7 ст. 34 + п. 10 ПП 1042) ──
     base = max(0.0, inp.price - inp.executed)
     daily = inp.key_rate / 100 / 300
-    peni_supplier = base * daily * inp.delay_days
-    step("База пени (цена − исполненное)",
-         f"{_fmt(inp.price)} − {_fmt(inp.executed)}", base,
-         "ч. 7 ст. 34 44-ФЗ, п. 10 ПП 1042")
-    step("Пени поставщика за просрочку",
-         f"{_fmt(base)} × ({_fmt(inp.key_rate)}% / 300) × {inp.delay_days} дн.",
-         peni_supplier, "1/300 ключевой ставки на дату уплаты")
+
+    # DYNAMIC_PENALTY_BASE: интервальный расчёт при частичном исполнении
+    if inp.intervals:
+        peni_supplier = 0.0
+        interval_details = []
+        for (start_day, days, executed_at_start, rate_pct) in inp.intervals:
+            i_base = max(0.0, inp.price - executed_at_start)
+            i_peni = i_base * (rate_pct / 100 / 300) * days
+            peni_supplier += i_peni
+            interval_details.append({
+                "день_начала": start_day, "дней": days,
+                "исполнено_на_начало": executed_at_start,
+                "база": round(i_base, 2), "ставка_%": rate_pct,
+                "пени_интервала": round(i_peni, 2),
+            })
+            step(f"Пени интервал (день {start_day}, {days} дн.)",
+                 f"({_fmt(inp.price)} − {_fmt(executed_at_start)}) × "
+                 f"({rate_pct}% / 300) × {days} дн.", i_peni,
+                 "ч. 7 ст. 34 44-ФЗ (интервальный расчёт)")
+        step("Итого пени по интервалам",
+             f"сумма {len(interval_details)} интервалов", peni_supplier,
+             "DYNAMIC_PENALTY_BASE")
+    else:
+        peni_supplier = base * daily * inp.delay_days
+        step("База пени (цена − исполненное)",
+             f"{_fmt(inp.price)} − {_fmt(inp.executed)}", base,
+             "ч. 7 ст. 34 44-ФЗ, п. 10 ПП 1042")
+        step("Пени поставщика за просрочку",
+             f"{_fmt(base)} × ({_fmt(inp.key_rate)}% / 300) × {inp.delay_days} дн.",
+             peni_supplier, "1/300 ключевой ставки на дату уплаты")
 
     # ── Штраф поставщика за ненадлежащее исполнение (п. 3 или п. 4) ──
     tiers = SME_FINE_TIERS if inp.is_sme else SUPPLIER_FINE_TIERS
@@ -250,7 +277,15 @@ def calc_penalties(inp: PenaltyInput) -> Dict:
             "Для контрактов с МСП сетка штрафа другая — 3/2/1% (п. 4), "
             "указывать применимую сетку обязательно",
             "Ставка берётся на ДАТУ УПЛАТЫ пени, не на дату просрочки",
+            "Если поставщик исполнял обязательства ЧАСТЯМИ внутри периода "
+            "просрочки, база пени считается по интервалам с разной суммой "
+            "неисполненного — используйте интервалы (см. intervals)",
+            "При частичном исполнении пеня за каждый интервал: "
+            "(цена − исполнено на начало интервала) × ставка/300 × дней интервала",
+            "Ключевая ставка может меняться внутри периода — берите ставку на "
+            "каждую дату уплаты (интервалы по ставкам ЦБ)",
         ],
+        "intervals": inp.intervals,
     }
 
 

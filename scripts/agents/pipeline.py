@@ -877,6 +877,16 @@ class Pipeline:
                 # Сохраняем для publish-gate в паспорте статьи (generate.py)
                 state.final_warnings = validation_warnings
 
+                # Структурная сигнатура для сравнения шаблонности между статьями
+                if getattr(state, "output_dir", ""):
+                    try:
+                        from pathlib import Path as _P
+                        from .template_lint import save_signature
+                        save_signature(state.final_article or state.draft or "",
+                                       _P(state.output_dir))
+                    except Exception as _sig_err:
+                        logger.debug(f"Сигнатура не сохранена: {_sig_err}")
+
                 # ── COVERAGE AUDIT: проверка что Heart не добавил новые факты ──
                 _claims = getattr(state, "claims", None)
                 if _claims:
